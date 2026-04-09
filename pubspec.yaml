@@ -1,0 +1,3 @@
+name: dart_cancel_examples
+environment:
+  sdk: '>=3.0.0 <4.0.0'
