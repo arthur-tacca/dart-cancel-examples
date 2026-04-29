@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:dart_cancel_experiments/abort.dart';
-import 'package:dart_cancel_experiments/utils.dart';
+import 'package:dart_cancel_examples/abort.dart';
+import 'package:dart_cancel_examples/utils.dart';
 
 /// Yields to the microtask queue so scheduled callbacks can run.
 Future<void> flushMicrotasks() => Future.microtask(() {});

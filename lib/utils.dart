@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:dart_cancel_experiments/abort.dart';
+import 'package:dart_cancel_examples/abort.dart';
 
 /// The outcome of a completed operation, capturing either a success value or
 /// a thrown exception.
