@@ -72,14 +72,17 @@ remove it.
 Example cancellable utility functions built on top of `abort.dart`.
 
 ```dart
-Future<Completed<T>> waitCancellable<T>(Future<T> future, [AbortSignal? signal]);
+Future<Outcome<T>> waitCancellable<T>(
+  Future<T> future, [
+  AbortSignal? signal,
+]);
 ```
 Waits for a [Future](https://api.dart.dev/dart-async/Future-class.html) to complete,
-returning outcome as a `Completed`. The wait can be interrupted with the abort
+returning outcome as an `Outcome`. The wait can be interrupted with the abort
 signal (but this does not cancel the function underlying the future).
 
 ```dart
-class Completed<T> {
+class Outcome<T> {
   final bool success;
   final T? result;
   final Object? exception;
@@ -92,14 +95,20 @@ thrown exception with its original stack trace. `get()` returns the value or
 re-throws with the original stack trace.
 
 ```dart
-Future<void> sleep(Duration duration, [AbortSignal? signal]);
+Future<void> sleep(
+  Duration duration, [
+  AbortSignal? signal,
+]);
 ```
 Sleeps for the given duration, like 
 [`Future.delayed`](https://api.dart.dev/dart-async/Future/Future.delayed.html)
 (without the computation parameter). Can be interrupted by the abort signal.
 
 ```dart
-Stream<T> streamCancellable<T>(Stream<T> stream, AbortSignal signal);
+Stream<T> streamCancellable<T>(
+  Stream<T> stream,
+  AbortSignal signal,
+);
 ```
 Wraps a [Stream](https://api.dart.dev/dart-async/Stream-class.html) so that an
 `AbortException` is injected and the source subscription cancelled when the
@@ -167,7 +176,7 @@ have no way to directly return a value.
 Future<void> waitAllAlt<T>(
   Map<String, Future<T> Function(AbortSignal)> tasks, {
   AbortSignal? signal,
-  Map<String, Completed<T>>? results,
+  Map<String, Outcome<T>>? results,
 });
 ```
 More elaborate version of `waitAll` where tasks are named by string key and
@@ -175,7 +184,11 @@ their individual outcomes are written into `results` before any exception is
 thrown. Tasks that raise `AbortException` are excluded from `results`.
 
 ```dart
-Future<Socket> connectSocket(String host, int port, {AbortSignal? abortSignal});
+Future<Socket> connectSocket(
+  String host,
+  int port, {
+  AbortSignal? abortSignal,
+});
 ```
 Cancellable TCP socket connection, built on
 [`Socket.startConnect`](https://api.dart.dev/dart-io/Socket/startConnect.html).

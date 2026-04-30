@@ -203,7 +203,7 @@ Future<void> demoWaitAll() async {
 
 Future<void> demoWaitAllAlt() async {
   print('\n--- waitAllAlt: one fails, results inspected in catch ---');
-  final results = <String, Completed<int>>{};
+  final results = <String, Outcome<int>>{};
   try {
     await waitAllAlt(<String, Future<int> Function(AbortSignal)>{
       'task 1': (signal) async { await sleep(Duration(milliseconds: 50),  signal); return 1; },

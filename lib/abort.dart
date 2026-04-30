@@ -18,7 +18,9 @@ base class _RegistrationEntry extends LinkedListEntry<_RegistrationEntry> {
     scheduleMicrotask(() {
       // This last-moment check (list != null) is to handle the case where
       // unregister() was called between this entry being scheduled and running.
-      if (list != null) callback();
+      if (list != null) {
+        callback();
+      }
     });
   }
 }
@@ -51,7 +53,9 @@ class AbortSignal {
   AbortSignal._();
 
   void _abort() {
-    if (_aborted) return;
+    if (_aborted) {
+      return;
+    }
     _aborted = true;
     for (final entry in _registrations) {
       entry.schedule();
@@ -61,7 +65,9 @@ class AbortSignal {
   bool get aborted => _aborted;
 
   void throwIfAborted() {
-    if (_aborted) throw const AbortException();
+    if (_aborted) {
+      throw const AbortException();
+    }
   }
 
   /// Registers [callback] to be called as a microtask when this signal is
@@ -69,7 +75,9 @@ class AbortSignal {
   AbortSignalRegistration register(void Function() callback) {
     final entry = _RegistrationEntry(callback);
     _registrations.add(entry);
-    if (_aborted) entry.schedule();
+    if (_aborted) {
+      entry.schedule();
+    }
     return AbortSignalRegistration._(entry);
   }
 

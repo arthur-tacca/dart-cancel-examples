@@ -5,7 +5,7 @@ import 'package:dart_cancel_examples/abort.dart';
 
 /// The outcome of a completed operation, capturing either a success value or
 /// a thrown exception.
-class Completed<T> {
+class Outcome<T> {
   /// Whether the operation succeeded normally rather than throwing.
   final bool success;
 
@@ -18,13 +18,13 @@ class Completed<T> {
   /// The stack trace from the throw site, if [success] is false.
   final StackTrace? stackTrace;
 
-  Completed._success(T value)
+  Outcome._success(T value)
       : success = true,
         result = value,
         exception = null,
         stackTrace = null;
 
-  Completed._failure(Object error, StackTrace stackTrace)
+  Outcome._failure(Object error, StackTrace stackTrace)
       : success = false,
         result = null,
         exception = error,
@@ -37,12 +37,12 @@ class Completed<T> {
       : Error.throwWithStackTrace(exception!, stackTrace!);
 }
 
-/// Waits for [future], wrapping the outcome in a [Completed].
+/// Waits for [future], wrapping the outcome in a [Outcome].
 ///
 /// If [signal] is aborted before [future] completes, throws [AbortException].
 /// If [signal] is already aborted on entry, returns an immediately-failed
 /// future.
-Future<Completed<T>> waitCancellable<T>(
+Future<Outcome<T>> waitCancellable<T>(
   Future<T> future, [
   AbortSignal? signal,
 ]) {
@@ -50,7 +50,7 @@ Future<Completed<T>> waitCancellable<T>(
     return Future.error(const AbortException());
   }
 
-  final completer = Completer<Completed<T>>();
+  final completer = Completer<Outcome<T>>();
   AbortSignalRegistration? registration;
 
   if (signal != null) {
@@ -67,13 +67,13 @@ Future<Completed<T>> waitCancellable<T>(
       // the same turn, its entry.list check will suppress it.
       registration?.unregister();
       if (!completer.isCompleted) {
-        completer.complete(Completed._success(value));
+        completer.complete(Outcome._success(value));
       }
     },
     onError: (Object error, StackTrace stackTrace) {
       registration?.unregister();
       if (!completer.isCompleted) {
-        completer.complete(Completed._failure(error, stackTrace));
+        completer.complete(Outcome._failure(error, stackTrace));
       }
     },
   );
@@ -96,7 +96,9 @@ Future<void> sleep(Duration duration, [AbortSignal? signal]) {
     // Guard needed: timer may have already been queued when abort called
     // timer.cancel(), leaving both the timer callback and the abort microtask
     // in flight. Abort wins by completing first; timer callback defers.
-    if (!completer.isCompleted) completer.complete();
+    if (!completer.isCompleted) {
+      completer.complete();
+    }
   });
 
   registration = signal?.register(() {
@@ -132,7 +134,9 @@ Stream<T> streamCancellable<T>(Stream<T> stream, AbortSignal signal) {
     registration = null;
     subscription?.cancel();
     subscription = null;
-    if (!controller.isClosed) controller.close();
+    if (!controller.isClosed) {
+      controller.close();
+    }
   }
 
   controller.onListen = () {
@@ -221,11 +225,15 @@ Future<List<T>> waitAll<T>(
       }
       return value;
     } catch (error, stackTrace) {
-      if (error is AbortException && !taskSignal.aborted) spuriousAbort = true;
+      if (error is AbortException && !taskSignal.aborted) {
+        spuriousAbort = true;
+      }
       internalController.abort();
       if (!hasFailure) {
         hasFailure = true;
-        for (final v in succeeded) cleanUp?.call(v);
+        for (final v in succeeded) {
+          cleanUp?.call(v);
+        }
         succeeded.clear();
       }
       if (error is! AbortException) {
@@ -282,7 +290,9 @@ Future<void> waitAllSimple(
     try {
       await task(taskSignal);
     } catch (error, stackTrace) {
-      if (error is AbortException && !taskSignal.aborted) spuriousAbort = true;
+      if (error is AbortException && !taskSignal.aborted) {
+        spuriousAbort = true;
+      }
       internalController.abort();
       if (error is AbortException) {
         hasAbortFailure = true;
@@ -294,7 +304,9 @@ Future<void> waitAllSimple(
   }
 
   final futures = tasks.map(wrap).toList();
-  for (final f in futures) await f;
+  for (final f in futures) {
+    await f;
+  }
 
   if (spuriousAbort) {
     throw StateError(
@@ -313,7 +325,7 @@ Future<void> waitAllSimple(
 }
 
 /// Like [waitAll] but returns [Future<void>] and populates [results] (if
-/// provided) with a [Completed<T>] for each task that either succeeded or
+/// provided) with a [Outcome<T>] for each task that either succeeded or
 /// threw a non-[AbortException] — keyed by the same string used in [tasks].
 /// Tasks that threw [AbortException] are omitted from [results]. The map is
 /// populated before any exception is thrown, so callers can inspect partial
@@ -322,7 +334,7 @@ Future<void> waitAllSimple(
 Future<void> waitAllAlt<T>(
   Map<String, Future<T> Function(AbortSignal)> tasks, {
   AbortSignal? signal,
-  Map<String, Completed<T>>? results,
+  Map<String, Outcome<T>>? results,
 }) async {
   final internalController = AbortController();
   final taskSignal = signal != null
@@ -344,9 +356,11 @@ Future<void> waitAllAlt<T>(
   ) async {
     try {
       final value = await entry.value(taskSignal);
-      results?[entry.key] = Completed._success(value);
+      results?[entry.key] = Outcome._success(value);
     } catch (error, stackTrace) {
-      if (error is AbortException && !taskSignal.aborted) spuriousAbort = true;
+      if (error is AbortException && !taskSignal.aborted) {
+        spuriousAbort = true;
+      }
       internalController.abort();
       if (error is AbortException) {
         hasAbortFailure = true;
@@ -354,13 +368,15 @@ Future<void> waitAllAlt<T>(
       }
       exceptions.add(error);
       exceptionStackTraces.add(stackTrace);
-      results?[entry.key] = Completed._failure(error, stackTrace);
+      results?[entry.key] = Outcome._failure(error, stackTrace);
     }
   }
 
   // Start all tasks concurrently, then wait for all to finish.
   final futures = tasks.entries.map(wrap).toList();
-  for (final f in futures) await f;
+  for (final f in futures) {
+    await f;
+  }
 
   // A spurious AbortException is a programmer error regardless of what other
   // tasks did, so check for it before inspecting exceptions.
