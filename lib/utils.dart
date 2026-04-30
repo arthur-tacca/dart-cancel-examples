@@ -55,6 +55,8 @@ Future<Completed<T>> waitCancellable<T>(
 
   if (signal != null) {
     registration = signal.register(() {
+      registration!.unregister();
+      registration = null;
       completer.completeError(const AbortException());
     });
   }
@@ -99,6 +101,7 @@ Future<void> sleep(Duration duration, [AbortSignal? signal]) {
 
   registration = signal?.register(() {
     timer.cancel();
+    registration!.unregister();
     completer.completeError(const AbortException());
   });
 
