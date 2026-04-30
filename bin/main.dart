@@ -108,7 +108,7 @@ Future<void> demoWaitCancellable() async {
 
   print('\n--- waitCancellable: aborted before future completes ---');
   final controller = AbortController();
-  final slowFuture = Future.delayed(Duration(seconds: 10), () => 99);
+  final slowFuture = Future.delayed(Duration(milliseconds: 500), () => 99);
   Future.delayed(Duration(milliseconds: 100), controller.abort);
   try {
     await waitCancellable(slowFuture, controller.signal);
@@ -203,20 +203,20 @@ Future<void> demoWaitAll() async {
 
 Future<void> demoWaitAllAlt() async {
   print('\n--- waitAllAlt: one fails, results inspected in catch ---');
-  final results = <Completed<int>>[];
+  final results = <String, Completed<int>>{};
   try {
-    await waitAllAlt(<Future<int> Function(AbortSignal)>[
-      (signal) async { await sleep(Duration(milliseconds: 50),  signal); return 1; },
-      (signal) async {
+    await waitAllAlt(<String, Future<int> Function(AbortSignal)>{
+      'task 1': (signal) async { await sleep(Duration(milliseconds: 50),  signal); return 1; },
+      'task 2': (signal) async {
         await sleep(Duration(milliseconds: 100), signal);
         throw Exception('task 2 failed');
       },
-      (signal) async { await sleep(Duration(milliseconds: 50),  signal); return 3; },
-    ], results: results);
+      'task 3': (signal) async { await sleep(Duration(milliseconds: 50),  signal); return 3; },
+    }, results: results);
   } on AggregateException {
-    for (var i = 0; i < results.length; i++) {
-      final r = results[i];
-      print('task ${i + 1}: '
+    for (final entry in results.entries) {
+      final r = entry.value;
+      print('${entry.key}: '
           '${r.success ? 'ok (${r.get()})' : 'failed (${r.exception})'}');
     }
   }
@@ -229,7 +229,7 @@ Future<void> demoConnectSocket() async {
   try {
     final socket = await connectSocket('127.0.0.1', server.port);
     print('connected to port ${socket.remotePort}');
-    await socket.close();
+    socket.destroy();
   } finally {
     await server.close();
   }
