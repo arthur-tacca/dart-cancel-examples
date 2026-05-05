@@ -44,8 +44,7 @@ class AbortSignalRegistration {
 /// An abort signal, also known as a cancel token.
 ///
 /// Allows checking whether already aborted and registering to be notified
-/// when it is aborted. Created through the [AbortController] class or its
-/// static methods [AbortSignal.timeout] and [AbortSignal.any].
+/// when it is aborted. Obtained from an [AbortController].
 class AbortSignal {
   bool _aborted = false;
   final LinkedList<_RegistrationEntry> _registrations = LinkedList();
@@ -80,46 +79,42 @@ class AbortSignal {
     }
     return AbortSignalRegistration._(entry);
   }
-
-  /// Returns a signal that aborts automatically after [duration].
-  static AbortSignal timeout(Duration duration) {
-    final signal = AbortSignal._();
-    Timer(duration, signal._abort);
-    return signal;
-  }
-
-  /// Returns a signal that aborts when any signal in [signals] aborts.
-  static AbortSignal any(Iterable<AbortSignal> signals) {
-    final combined = AbortSignal._();
-    final registrations = <AbortSignalRegistration>[];
-
-    void onAbort() {
-      for (final reg in registrations) {
-        reg.unregister();
-      }
-      combined._abort();
-    }
-
-    for (final signal in signals) {
-      if (signal._aborted) {
-        // _abort() is called directly rather than relying on register() to
-        // schedule it, so that combined.aborted is set synchronously here
-        // rather than in a later microtask.
-        onAbort();
-        return combined;
-      }
-      registrations.add(signal.register(onAbort));
-    }
-
-    return combined;
-  }
 }
 
 /// Controller that allows aborting requests through its [AbortSignal].
+///
+/// If [timeout] is supplied, [abort] is called automatically after that
+/// duration. If [linkedSignals] is supplied, [abort] is called when any of
+/// them aborts. In both cases, calling [abort] cancels the timer and removes
+/// registrations on linked signals, avoiding leaks.
 class AbortController {
   final AbortSignal _signal = AbortSignal._();
+  Timer? _timer;
+  List<AbortSignalRegistration>? _linkedRegistrations;
+
+  AbortController({Duration? timeout, Iterable<AbortSignal>? linkedSignals}) {
+    if (timeout != null) {
+      _timer = Timer(timeout, abort);
+    }
+    if (linkedSignals != null) {
+      final regs = _linkedRegistrations = [];
+      for (final signal in linkedSignals) {
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        regs.add(signal.register(abort));
+      }
+    }
+  }
 
   AbortSignal get signal => _signal;
 
-  void abort() => _signal._abort();
+  void abort() {
+    _timer?.cancel();
+    _timer = null;
+    _linkedRegistrations?.forEach((reg) => reg.unregister());
+    _linkedRegistrations = null;
+    _signal._abort();
+  }
 }

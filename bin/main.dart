@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:dart_cancel_examples/abort.dart';
+import 'package:dart_cancel_examples/task_group.dart';
 import 'package:dart_cancel_examples/utils.dart';
 
 /// Yields to the microtask queue so scheduled callbacks can run.
@@ -15,8 +16,8 @@ void main() async {
   await demoStreamCancellable();
   await demoSleep();
   await demoWaitAll();
-  await demoWaitAllAlt();
   await demoConnectSocket();
+  await demoTaskGroup();
 }
 
 Future<void> demoBasicAbort() async {
@@ -66,28 +67,28 @@ Future<void> demoRegisterUnregister() async {
 }
 
 Future<void> demoAny() async {
-  print('\n--- AbortSignal.any() ---');
+  print('\n--- AbortController linkedSignals ---');
   final c1 = AbortController();
   final c2 = AbortController();
-  final combined = AbortSignal.any([c1.signal, c2.signal]);
+  final combined = AbortController(linkedSignals: [c1.signal, c2.signal]);
 
-  combined.register(() => print('combined fired'));
+  combined.signal.register(() => print('combined fired'));
 
-  print('combined aborted before: ${combined.aborted}');
-  c2.abort(); // schedules onAbort microtask
-  await flushMicrotasks(); // onAbort runs, combined aborts, 'combined fired' scheduled
+  print('combined aborted before: ${combined.signal.aborted}');
+  c2.abort(); // schedules combined.abort as microtask
+  await flushMicrotasks(); // combined.abort runs, signal aborts, 'combined fired' scheduled
   await flushMicrotasks(); // 'combined fired' prints here
-  print('combined aborted after: ${combined.aborted}');
+  print('combined aborted after: ${combined.signal.aborted}');
 }
 
 Future<void> demoTimeout() async {
-  print('\n--- AbortSignal.timeout() ---');
-  final signal = AbortSignal.timeout(Duration(milliseconds: 300));
-  signal.register(() => print('timed out'));
+  print('\n--- AbortController timeout ---');
+  final controller = AbortController(timeout: Duration(milliseconds: 300));
+  controller.signal.register(() => print('timed out'));
 
-  print('aborted before wait: ${signal.aborted}');
+  print('aborted before wait: ${controller.signal.aborted}');
   await Future.delayed(Duration(milliseconds: 500));
-  print('aborted after wait: ${signal.aborted}');
+  print('aborted after wait: ${controller.signal.aborted}');
 }
 
 Future<void> demoWaitCancellable() async {
@@ -150,7 +151,7 @@ Future<void> demoSleep() async {
 
 Future<void> demoWaitAll() async {
   print('\n--- waitAll: all succeed ---');
-  final results = await waitAll([
+  final results = await TaskGroup.waitAll([
     (signal) async { await sleep(Duration(milliseconds: 100), signal); return 1; },
     (signal) async { await sleep(Duration(milliseconds: 50),  signal); return 2; },
     (signal) async { await sleep(Duration(milliseconds: 150), signal); return 3; },
@@ -159,7 +160,7 @@ Future<void> demoWaitAll() async {
 
   print('\n--- waitAll: one fails, others cancelled ---');
   try {
-    await waitAll(<Future<int> Function(AbortSignal)>[
+    await TaskGroup.waitAll(<Future<int> Function(AbortSignal)>[
       (signal) async { await sleep(Duration(milliseconds: 200), signal); return 1; },
       (signal) async {
         await sleep(Duration(milliseconds: 50), signal);
@@ -176,12 +177,12 @@ Future<void> demoWaitAll() async {
   final controller = AbortController();
   Future.delayed(Duration(milliseconds: 50), controller.abort);
   try {
-    await waitAll(
+    await TaskGroup.waitAll(
       [
         (signal) async { await sleep(Duration(seconds: 10), signal); return 1; },
         (signal) async { await sleep(Duration(seconds: 10), signal); return 2; },
       ],
-      signal: controller.signal,
+      parentSignal: controller.signal,
     );
   } on AbortException {
     print('threw AbortException');
@@ -189,7 +190,7 @@ Future<void> demoWaitAll() async {
 
   print('\n--- waitAll: cleanUp called on successes when another fails ---');
   try {
-    await waitAll(<Future<String> Function(AbortSignal)>[
+    await TaskGroup.waitAll(<Future<String> Function(AbortSignal)>[
       (signal) async { await sleep(Duration(milliseconds: 50), signal); return 'resource-A'; },
       (signal) async {
         await sleep(Duration(milliseconds: 100), signal);
@@ -198,27 +199,6 @@ Future<void> demoWaitAll() async {
     ], cleanUp: (v) => print('cleanUp called for: $v'));
   } on AggregateException {
     print('AggregateException thrown');
-  }
-}
-
-Future<void> demoWaitAllAlt() async {
-  print('\n--- waitAllAlt: one fails, results inspected in catch ---');
-  final results = <String, Outcome<int>>{};
-  try {
-    await waitAllAlt(<String, Future<int> Function(AbortSignal)>{
-      'task 1': (signal) async { await sleep(Duration(milliseconds: 50),  signal); return 1; },
-      'task 2': (signal) async {
-        await sleep(Duration(milliseconds: 100), signal);
-        throw Exception('task 2 failed');
-      },
-      'task 3': (signal) async { await sleep(Duration(milliseconds: 50),  signal); return 3; },
-    }, results: results);
-  } on AggregateException {
-    for (final entry in results.entries) {
-      final r = entry.value;
-      print('${entry.key}: '
-          '${r.success ? 'ok (${r.get()})' : 'failed (${r.exception})'}');
-    }
   }
 }
 
@@ -241,7 +221,7 @@ Future<void> demoConnectSocket() async {
     final controller = AbortController()..abort();
     try {
       await connectSocket('127.0.0.1', server2.port,
-          abortSignal: controller.signal);
+          signal: controller.signal);
     } on AbortException {
       print('threw AbortException immediately');
     }
@@ -251,12 +231,134 @@ Future<void> demoConnectSocket() async {
 
   print('\n--- connectSocket: aborted during connect ---');
   // 10.0.0.1 is non-routable here so the connect hangs, letting abort win
-  final signal = AbortSignal.timeout(Duration(milliseconds: 100));
+  final signal = AbortController(timeout: Duration(milliseconds: 100)).signal;
   try {
-    await connectSocket('10.0.0.1', 80, abortSignal: signal);
+    await connectSocket('10.0.0.1', 80, signal: signal);
   } on AbortException {
     print('threw AbortException mid-connect');
   }
+}
+
+Future<void> demoTaskGroup() async {
+  print('\n--- TaskGroup.using: all tasks succeed ---');
+  final order = <int>[];
+  await TaskGroup.using((tg) async {
+    tg.spawn((signal) async {
+      await sleep(Duration(milliseconds: 100), signal);
+      order.add(1);
+    });
+    tg.spawn((signal) async {
+      await sleep(Duration(milliseconds: 50), signal);
+      order.add(2);
+    });
+  });
+  print('completed, finish order: $order'); // expect [2, 1]
+
+  print('\n--- TaskGroup.using: one task fails, sibling cancelled ---');
+  try {
+    await TaskGroup.using((tg) async {
+      tg.spawn((signal) async {
+        await sleep(Duration(milliseconds: 200), signal);
+        order.add(99); // should not reach here
+      });
+      tg.spawn((signal) async {
+        await sleep(Duration(milliseconds: 50), signal);
+        throw Exception('task failed');
+      });
+    });
+  } on AggregateException catch (e) {
+    print('AggregateException: ${e.exceptions}');
+    print('sibling was cancelled (99 not in order): ${!order.contains(99)}');
+  }
+
+  print('\n--- TaskGroup.using: body itself throws ---');
+  try {
+    await TaskGroup.using((tg) async {
+      tg.spawn((signal) async {
+        await sleep(Duration(milliseconds: 200), signal);
+      });
+      throw Exception('body failed');
+    });
+  } on AggregateException catch (e) {
+    print('AggregateException from body: ${e.exceptions}');
+  }
+
+  print('\n--- TaskGroup: spawnWithFuture returns individual result ---');
+  final tg = TaskGroup();
+  final fut = tg.spawnWithFuture((signal) async {
+    await sleep(Duration(milliseconds: 50), signal);
+    return 42;
+  });
+  await tg.waitComplete();
+  print('individual result: ${await fut}');
+  print('completed: ${tg.completed}');
+
+  print('\n--- TaskGroup: waitComplete() called twice returns same future ---');
+  final tg2 = TaskGroup();
+  tg2.spawn((signal) async => sleep(Duration(milliseconds: 50), signal));
+  final f1 = tg2.waitComplete();
+  final f2 = tg2.waitComplete();
+  await f1;
+  print('same future: ${identical(f1, f2)}');
+
+  print('\n--- TaskGroup: abort() with no task errors completes normally ---');
+  final tg3 = TaskGroup();
+  tg3.spawn((signal) async {
+    await sleep(Duration(seconds: 10), signal);
+  });
+  Future.delayed(Duration(milliseconds: 50), tg3.abort);
+  await tg3.waitComplete();
+  print('completed normally, signal aborted: ${tg3.signal.aborted}');
+
+  print('\n--- TaskGroup: spawn() after completed throws StateError ---');
+  final tg4 = TaskGroup();
+  await tg4.waitComplete();
+  try {
+    tg4.spawn((_) async {});
+  } on StateError catch (e) {
+    print('StateError: $e');
+  }
+
+  print('\n--- TaskGroup: abort() after completed throws StateError ---');
+  final tg5 = TaskGroup();
+  await tg5.waitComplete();
+  try {
+    tg5.abort();
+  } on StateError catch (e) {
+    print('StateError: $e');
+  }
+
+  print('\n--- TaskGroup: parentSignal aborts the group ---');
+  final controller = AbortController();
+  Future.delayed(Duration(milliseconds: 50), controller.abort);
+  try {
+    await TaskGroup.using((tg) async {
+      tg.spawn((signal) async {
+        await sleep(Duration(seconds: 10), signal);
+      });
+    }, parentSignal: controller.signal);
+  } on AbortException {
+    print('threw AbortException from parentSignal');
+  }
+
+  print('\n--- TaskGroup: timeout fires, raiseOnTimeout=true ---');
+  try {
+    await TaskGroup.using((tg) async {
+      tg.spawn((signal) async {
+        await sleep(Duration(seconds: 10), signal);
+      });
+    }, timeout: Duration(milliseconds: 50));
+  } on TimeoutException {
+    print('threw TimeoutException');
+  }
+
+  print('\n--- TaskGroup: timeout fires, raiseOnTimeout=false ---');
+  final tg6 = TaskGroup(timeout: Duration(milliseconds: 50), raiseOnTimeout: false);
+  tg6.spawn((signal) async {
+    await sleep(Duration(seconds: 10), signal);
+  });
+  await tg6.waitComplete();
+  print('completed normally, didTimeout: ${tg6.didTimeout}');
 }
 
 Future<void> demoStreamCancellable() async {

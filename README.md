@@ -1,16 +1,33 @@
 # Dart cancel tokens code examples 
 
 This repository contains example Dart code to accompany a proposal to add
-cancellation tokens to the [Dart programming language](https://dart.dev). The
-design is modelled on JavaScript's `AbortController`/`AbortSignal` and C#'s
-`CancellationTokenSource`/`CancellationToken`.
+cancellation tokens to the [Dart programming language](https://dart.dev).
+The design is modelled on JavaScript's `AbortController`/`AbortSignal` and C#'s
+`CancellationTokenSource`/`CancellationToken`. 
+
+It has a complete implementation
+of the cancellation token itself, a few cancellable waiting primitives,
+a task group class to allow structured concurrency, and cancellable TCP connect() functions.
 
 - **Proposal:** https://gist.github.com/arthur-tacca/accbd333a6378619936e34d184b0d152
 - **Discussion:** https://github.com/dart-lang/sdk/issues/63017
 - **Code examples:** https://github.com/arthur-tacca/dart-cancel-examples
 
-A typical usage looks like this, where `readBytes` is some routine that accepts
-a cancel token:
+## Contents
+
+- [Example usage](#example-usage)
+- [`lib/abort.dart`](#libabootdart)
+- [`lib/utils.dart`](#libutilsdart)
+- [Task group usage](#task-group-usage)
+- [`lib/task_group.dart`](#libtask_groupdart)
+- [`bin/main.dart`](#binmaindart)
+- [Further development](#further-development)
+- [License](#license)
+
+## Example usage
+
+A typical usage to create a token and pass it to a function that supports cancellation
+would look like this:
 
 ```dart
 Future<Uint8List> remoteRead() async {
@@ -25,9 +42,32 @@ Future<Uint8List> remoteRead() async {
 }
 ```
 
-***Disclaimer:** I'm very familiar with general cancellation concepts but new to
-Dart so much of this code was written with AI help (with a lot of human guidance and
-supervision ... except for main.dart, which I've hardly looked at).*
+To write a function that supports being cancelled, typically you just have to
+forward the token on to functions that you call, like this:
+
+```dart
+Future<Uint8List> readBytes(
+  String host,
+  int port,
+  int byteCount, {
+  AbortSignal? signal,
+}) async {
+  final socket = await connectSocket(host, port, signal: signal);
+  try {
+    final buffer = BytesBuilder(copy: false);
+    await for (final chunk in streamCancellable(socket, signal)) {
+      buffer.add(chunk);
+      if (buffer.length >= byteCount) break;
+    }
+    if (buffer.length < byteCount) {
+      throw SocketException('Connection closed before $byteCount bytes received');
+    }
+    return buffer.takeBytes();
+  } finally {
+    socket.destroy();
+  }
+}
+```
 
 ## `lib/abort.dart`
 
@@ -35,28 +75,35 @@ The core cancellation types.
 
 ```dart
 class AbortController {
+  AbortController({
+    Duration? timeout,
+    Iterable<AbortSignal>? linkedSignals,
+  });
   AbortSignal get signal;
   void abort();
 }
 ```
-Creates and owns an `AbortSignal`; call `abort()` to cancel it.
+Creates and owns an `AbortSignal`. The signal is aborted when `abort()` is called, when the `timeout` expires, or when any of the linked signals is aborted. (The linked signals parameter is most often used with a list of length 1, representing a parent operation's signal.)
+
+> [!NOTE]
+> The resources associated with the timeout and linked signals will be cleaned up when the signal is aborted (for any reason). Applications that could use a large number of signals should explicitly call `abort()` on them when they are no longer needed to avoid leaking resources.
+>
+> The design originally followed JavaScript's model of having `AbortSignal.timeout()` and `AbortSignal.any()` instead of these parameters on `AbortController`. That design is a bit neater, but gives no interface to clean up resources.
 
 ```dart
 class AbortSignal {
   bool get aborted;
   void throwIfAborted();
   AbortSignalRegistration register(void Function() callback);
-  static AbortSignal timeout(Duration duration);
-  static AbortSignal any(Iterable<AbortSignal> signals);
-}  
+}
 ```
-The cancel token itself. Obtain one from an `AbortController` or the static
-factory methods. `register()` schedules a callback as a microtask when the
-signal aborts.
+The cancel token itself. Obtained from an `AbortController`.
+`register()` schedules a callback as a microtask when the signal aborts.
 
 ```dart
 class AbortException implements Exception {}
 ```
+
 Thrown when an operation is cancelled.
 
 ```dart
@@ -94,6 +141,9 @@ Captures the outcome of a `waitCancellable` call: either a success value or a
 thrown exception with its original stack trace. `get()` returns the value or
 re-throws with the original stack trace.
 
+> [!NOTE]
+> It might seem odd that this proxy object is returned rather than returning the result or throwing the exception directly. The reason for this is partly philosophical: if you're using `waitCancellable()` then that means the awaited operation is not really owned by this caller, so we shouldn't have the operation's exceptions raised directly. But it's mainly practical: it allows distinguishing an `AbortException` from the signal parameter versus one propagated from the operation.
+
 ```dart
 Future<void> sleep(
   Duration duration, [
@@ -102,49 +152,99 @@ Future<void> sleep(
 ```
 Sleeps for the given duration, like 
 [`Future.delayed`](https://api.dart.dev/dart-async/Future/Future.delayed.html)
-(without the computation parameter). Can be interrupted by the abort signal.
+(without the computation parameter) or
+[`Timer`](https://api.flutter.dev/flutter/dart-async/Timer-class.html). Can be
+interrupted by the abort signal.
+
 
 ```dart
 Stream<T> streamCancellable<T>(
-  Stream<T> stream,
-  AbortSignal signal,
-);
+  Stream<T> stream, [
+  AbortSignal? signal,
+]);
 ```
 Wraps a [Stream](https://api.dart.dev/dart-async/Stream-class.html) so that an
 `AbortException` is injected and the source subscription cancelled when the
 signal aborts.
 
 ```dart
-Future<List<T>> waitAll<T>(
-  Iterable<Future<T> Function(AbortSignal)> tasks, {
+Future<Socket> connectSocket(
+  String host,
+  int port, {
   AbortSignal? signal,
-  void Function(T)? cleanUp,
+});
+
+Future<SecureSocket> connectSecureSocket(
+  String host,
+  int port, {
+  SecurityContext? context,
+  bool Function(X509Certificate)? onBadCertificate,
+  AbortSignal? signal,
 });
 ```
-Runs tasks concurrently and waits for them all to finish, similar to
-[`Future.wait()`](https://api.dart.dev/dart-async/Future/wait.html).
+Cancellable TCP socket connections, built on
+[`Socket.startConnect`](https://api.dart.dev/dart-io/Socket/startConnect.html) and
+[`SecureSocket.startConnect`](https://api.dart.dev/dart-io/SecureSocket/startConnect.html).
 
-If any of the functions raises an exception then the others are aborted. This
-resolves the dilemma posed by the `eagerError` parameter on `Future.wait()`: if
-`false` then it could wait a long time to report an error, but if `true` then it
-gives no way to know when all tasks have finished. This function only
-returns when all tasks complete, but this should happen promptly after any error.
-It also collects all exceptions (except `AbortException`) into an `AggregateException`, so unlike
-`Future.wait()` none are discarded. This is inspired by 
-[structured concurrency](https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/),
-although this function is not quite as powerful as it lacks the ability to dynamically wait on 
-more tasks once started. 
+The socket interface in Dart is stream based, which is problematic in some ways, but it means that most of the cancellation support comes almost for free.
 
-The tasks can also be interrupted by the optional `AbortSignal` parameter (but
-this is not necessary for any of the above functionality). Unlike most cancellable
-functions, this function is deliberately **not** a no-op if it is run with an
-already-aborted signal; tasks are all still started, although with an
-already-aborted signal passed to them too. This to allow the tasks to run to the
-point that they can release any resources they are responsible for. It's similar
-to how Trio ensures all tasks run until at least their first `await`
-([but asyncio does not](https://github.com/python/cpython/issues/116048)).
+* Listening for incoming connections to a socket server uses `Stream` so can be cancelled with `streamCancellable()`.
+* Reading from a socket uses `Stream` so can be cancelled with `streamCancellable()`.
+* Writing to a socket just pushes data to a queue so doesn't need cancellation support. You can drain the queue with `flush()` but that can just be abandoned using `waitCancellable()`.
+* The confusingly named `destroy()` method to close the socket is synchronous (as methods to close asynchronous resources generally should be).
 
-Raises a `StateError` if any task raises `AbortException` when it is not aborted. 
+## Task group usage
+
+The `TaskGroup` class encapsulates a safe wait for multiple concurrent tasks; if one throws an exception then the others are cancelled (with an `AbortSignal`) and the task group continues to wait for them to complete. This technique is called structured concurrency, introduced in the excellent article [*Go statement considered harmful*](https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/).
+
+You use a `TaskGroup` like this:
+
+```dart
+Future<Map<String, Uint8List>> remoteReads() async {
+  final results = <String, Uint8List>{};
+  TaskGroup taskGroup = TaskGroup();
+  taskGroup.spawn((signal) async {
+    results['alpha'] = await readBytes('alpha.example.com', 8080, 100, signal: signal);
+  });
+  taskGroup.spawn((signal) async {
+    results['beta'] = await readBytes('beta.example.com', 8080, 100, signal: signal);
+  });
+  await taskGroup.waitComplete();
+  return results;
+}
+```
+
+The static method `TaskGroup.using()` (named after `using {...}` blocks in C#) is a helper that allows using a task group like a scope, like in most other languages that support structured concurrency. It's particularly useful for nesting multiple task groups correctly. Use it like this: 
+
+```dart
+Future<Map<String, Uint8List>> remoteReads() async {
+  final results = <String, Uint8List>{};
+  await TaskGroup.using((taskGroup) async {
+    taskGroup.spawn((signal) async {
+      results['alpha'] = await readBytes('alpha.example.com', 8080, 100, signal: signal);
+    });
+    taskGroup.spawn((signal) async {
+      results['beta'] = await readBytes('beta.example.com', 8080, 100, signal: signal);
+    });
+  });
+  return results;
+}
+```
+
+The static method `TaskGroup.waitAll()` allows waiting for a fixed length list of tasks, similar to [`Future.wait()`](https://api.dart.dev/dart-async/Future/wait.html), which is useful when you don't need the full flexibility of `TaskGroup`. It uses a `TaskGroup` under the hood so it follows all the same rules when tasks throw an exception. This resolves the dilemma posed by the `eagerError` parameter on `Future.wait()`: if `false` then it could wait a long time to report an error, but if `true` then it gives no way to know when all tasks have finished. In contrast, `TaskGroup.waitAll()` waits until all tasks are done, but should return promptly after an error (if they handle cancellation suitably). Use it like this: 
+
+```dart
+Future<List<Uint8List>> remoteReads() async {
+  return await TaskGroup.waitAll([
+    (signal) => readBytes('alpha.example.com', 8080, 100, signal: signal),
+    (signal) => readBytes('beta.example.com', 8080, 100, signal: signal),
+  ]);
+}
+```
+
+## `lib/task_group.dart`
+
+Task group implementation
 
 ```dart
 class AggregateException implements Exception {
@@ -152,48 +252,73 @@ class AggregateException implements Exception {
   final List<StackTrace> stackTraces;
 }
 ```
-Thrown by the `waitAll` family when one or more tasks fail with a
-non-`AbortException`. Similar to JavaScript
-[`AggregateError`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AggregateError),
-C# [`AggregateException`](https://learn.microsoft.com/en-us/dotnet/api/system.aggregateexception),
-Python [exception groups](https://docs.python.org/3/library/exceptions.html#exception-groups),
-etc.
 
+Thrown by TaskGroup.waitComplete(), TaskGroup.using() and TaskGroup.waitAll() when one or more tasks fail. All the exceptions (except any `AbortException` instances) are collected into it, which ensures no failure is silently discarded.
 
 ```dart
-Future<void> waitAllSimple(
-  Iterable<Future<void> Function(AbortSignal)> tasks, {
-  AbortSignal? signal,
-});
+class TaskGroup {
+  TaskGroup({
+    AbortSignal? parentSignal,
+    Duration? timeout,
+    bool raiseOnTimeout = true,
+  });
+  static Future<void> using(
+    Future<void> Function(TaskGroup) body, {
+    AbortSignal? parentSignal,
+    Duration? timeout,
+    bool raiseOnTimeout = true,
+  });
+  static Future<List<T>> waitAll<T>(
+    Iterable<Future<T> Function(AbortSignal)> tasks, {
+    AbortSignal? parentSignal,
+    Duration? timeout,
+    void Function(T)? cleanUp,
+  });
+  AbortSignal get signal;
+  bool get completed;
+  bool get didTimeout;
+  void abort();
+  void spawn<T>(Future<T> Function(AbortSignal) task);
+  Future<T> spawnWithFuture<T>(Future<T> Function(AbortSignal) task);
+  Future<void> waitComplete();
+}
 ```
-Simpler version of `waitAll` for tasks that do not return values. This is less
-restrictive than it sounds, as tasks can store results in captured variables. 
-This is the same reasoning given that tasks in
-[Trio nurseries](https://trio.readthedocs.io/en/stable/reference-core.html#nurseries-and-spawning)
-have no way to directly return a value.
 
-```dart
-Future<void> waitAllAlt<T>(
-  Map<String, Future<T> Function(AbortSignal)> tasks, {
-  AbortSignal? signal,
-  Map<String, Outcome<T>>? results,
-});
-```
-More elaborate version of `waitAll` where tasks are named by string key and
-their individual outcomes are written into `results` before any exception is
-thrown. Tasks that raise `AbortException` are excluded from `results`.
+Runs tasks and waits for them to complete. Use `spawn()` to start tasks and use `waitComplete()` to wait for them all to finish. So long as `waitComplete()` has not
+yet returned, new tasks may continue to be spawned.
+ If any task throws an exception then all tasks are cancelled (to be more
+precise: the signal passed to all tasks is aborted), but `waitComplete()`
+still waits for them all to finish, and new tasks may even still be spawned. 
 
-```dart
-Future<Socket> connectSocket(
-  String host,
-  int port, {
-  AbortSignal? abortSignal,
-});
-```
-Cancellable TCP socket connection, built on
-[`Socket.startConnect`](https://api.dart.dev/dart-io/Socket/startConnect.html).
+> [!NOTE]
+> A task group can raise the following exceptions, listed in priority order: 
+>
+> * `StateError` if a task throws `AbortException` despite its `AbortSignal` not being aborted (this is a programming error)
+> * `AggregateException` if any task throws an exception other than `AbortException`
+> * `AbortException` if the parent signal is aborted
+> * `TimeoutException` if the specified timeout expires (and `raiseOnTimeout` is true, which is its default) 
+> * Otherwise, no exception is raised, even if `TaskGroup.abort()` has been called (the task group consumes its own abort exceptions)
 
 ## `bin/main.dart`
 
-A scratch file for manually testing and exercising the code in the other two
-files.
+A scratch file for manually testing and exercising the code in the other files.
+
+
+## Further development
+
+This code is already useful as it stands. But there are a few potential additions that could further improve it (besides tests and documentation!):
+
+* **New base class for `AbortException`:** In this code, `AbortException` derives from `Exception` but that means it will be caught by any blanket `catch (Exception)` blocks. Ideally, Dart would introduce a new `BaseException` class, a shared base for `Exception` and `Error`, and `AbortException` could derive from that directly. As a bonus, if Dart later puts traceback information in the exception (where it belongs!), or adds exception chaining, then this gives a central place to put it. (This is inspired by Python's `BaseException`, which asyncio and Trio both use as the direct base for their cancellation exceptions.)
+* **Support cancellable HTTP and web sockets:** Cancellation tokens finally give a natural way to specify when `HttpClient.getUrl()` and others should abort (see https://github.com/dart-lang/sdk/issues/51267 – which actually suggests `AbortSignal`!). I haven't thought through the implications to the http API (e.g. should the cancel token passed to a request method be inherited by close() or should that take its own? And it looks like there needs to be a synchronous method to close a request that doesn't depend on whether it's got to response stage).  
+* **Passing cancel tokens between isolates:** This is a bit more specialised, but would help with cancelling work delegated to other isolates. It would be a lot more intrusive than the other changes described here so it might be worth making it more general e.g. supporting a general [event object](https://en.wikipedia.org/wiki/Event_(computing)) passed between isolates (which is what a cancel token essentially is). This is safe so long as the destination can only read the value (i.e. for cancel tokens, you can only pass the signal not the controller) and so long as it can't be unset (uncancelled). It should be possible to see an update without an event loop iteration, so that it's possible to interrupt a long running CPU operation if the user's code polls it occasionally.
+
+## License 
+
+Copyright 2026 Arthur Tacca
+
+Dual licensed. You may use under the terms of either:
+
+* 3 clause BSD license
+* Boost Software License 1.0
+
+I'm happy to be considered as one of the "Dart contributors" for attribution purposes, and happy to sign a CLA if needed.
