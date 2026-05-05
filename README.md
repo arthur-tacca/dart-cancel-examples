@@ -17,7 +17,8 @@ a task group class to allow structured concurrency, and cancellable TCP connect(
 
 - [Example usage](#example-usage)
 - [`lib/abort.dart`](#libabootdart)
-- [`lib/utils.dart`](#libutilsdart)
+- [`lib/cancellable.dart`](#libcancellabledart)
+- [`lib/networking.dart`](#libnetworkingdart)
 - [Task group usage](#task-group-usage)
 - [`lib/task_group.dart`](#libtask_groupdart)
 - [`bin/main.dart`](#binmaindart)
@@ -114,9 +115,9 @@ class AbortSignalRegistration {
 Represents a callback registered with an `AbortSignal`; call `unregister()` to
 remove it.
 
-## `lib/utils.dart`
+## `lib/cancellable.dart`
 
-Example cancellable utility functions built on top of `abort.dart`.
+Cancellable wrappers around Dart's core async primitives.
 
 ```dart
 Future<Outcome<T>> waitCancellable<T>(
@@ -166,6 +167,10 @@ Stream<T> streamCancellable<T>(
 Wraps a [Stream](https://api.dart.dev/dart-async/Stream-class.html) so that an
 `AbortException` is injected and the source subscription cancelled when the
 signal aborts.
+
+## `lib/networking.dart`
+
+Cancellable TCP routines.
 
 ```dart
 Future<Socket> connectSocket(
