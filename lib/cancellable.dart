@@ -17,13 +17,13 @@ class Outcome<T> {
   /// The stack trace from the throw site, if [success] is false.
   final StackTrace? stackTrace;
 
-  Outcome._success(T value)
+  Outcome.succeeded(T value)
       : success = true,
         result = value,
         exception = null,
         stackTrace = null;
 
-  Outcome._failure(Object error, StackTrace stackTrace)
+  Outcome.failed(Object error, StackTrace stackTrace)
       : success = false,
         result = null,
         exception = error,
@@ -66,13 +66,13 @@ Future<Outcome<T>> waitCancellable<T>(
       // the same turn, its entry.list check will suppress it.
       registration?.unregister();
       if (!completer.isCompleted) {
-        completer.complete(Outcome._success(value));
+        completer.complete(Outcome.succeeded(value));
       }
     },
     onError: (Object error, StackTrace stackTrace) {
       registration?.unregister();
       if (!completer.isCompleted) {
-        completer.complete(Outcome._failure(error, stackTrace));
+        completer.complete(Outcome.failed(error, stackTrace));
       }
     },
   );
@@ -92,12 +92,7 @@ Future<void> sleep(Duration duration, [AbortSignal? signal]) {
 
   final timer = Timer(duration, () {
     registration?.unregister();
-    // Guard needed: timer may have already been queued when abort called
-    // timer.cancel(), leaving both the timer callback and the abort microtask
-    // in flight. Abort wins by completing first; timer callback defers.
-    if (!completer.isCompleted) {
-      completer.complete();
-    }
+    completer.complete();
   });
 
   registration = signal?.register(() {

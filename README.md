@@ -21,6 +21,7 @@ a task group class to allow structured concurrency, and cancellable TCP connect(
 - [`lib/networking.dart`](#libnetworkingdart)
 - [Task group usage](#task-group-usage)
 - [`lib/task_group.dart`](#libtask_groupdart)
+- [`bin/examples.dart`](#binexamplesdart)
 - [`bin/main.dart`](#binmaindart)
 - [Further development](#further-development)
 - [License](#license)
@@ -224,7 +225,7 @@ The static method `TaskGroup.using()` (named after `using {...}` blocks in C#) i
 ```dart
 Future<Map<String, Uint8List>> remoteReads() async {
   final results = <String, Uint8List>{};
-  await TaskGroup.using((taskGroup) async {
+  await TaskGroup.using(body: (taskGroup) async {
     taskGroup.spawn((signal) async {
       results['alpha'] = await readBytes('alpha.example.com', 8080, 100, signal: signal);
     });
@@ -247,6 +248,12 @@ Future<List<Uint8List>> remoteReads() async {
 }
 ```
 
+> [!NOTE]
+> The file `bin/examples.dart` has two extra task group examples:
+>
+> * Happy eyeballs, the "hello world" of structured concurrency; starts multiple connection attempts staggered over time, picking the first to succeed
+> * Nested task group server, showing how to nest groups; an outer one handles connections and an inner one handles listening ports
+
 ## `lib/task_group.dart`
 
 Task group implementation
@@ -267,8 +274,8 @@ class TaskGroup {
     Duration? timeout,
     bool raiseOnTimeout = true,
   });
-  static Future<void> using(
-    Future<void> Function(TaskGroup) body, {
+  static Future<void> using({
+    required Future<void> Function(TaskGroup) body,
     AbortSignal? parentSignal,
     Duration? timeout,
     bool raiseOnTimeout = true,
@@ -284,7 +291,7 @@ class TaskGroup {
   bool get didTimeout;
   void abort();
   void spawn<T>(Future<T> Function(AbortSignal) task);
-  Future<T> spawnWithFuture<T>(Future<T> Function(AbortSignal) task);
+  Future<Outcome<T>> spawnWithFuture<T>(Future<T> Function(AbortSignal) task);
   Future<void> waitComplete();
 }
 ```
@@ -303,6 +310,10 @@ still waits for them all to finish, and new tasks may even still be spawned.
 > * `AbortException` if the parent signal is aborted
 > * `TimeoutException` if the specified timeout expires (and `raiseOnTimeout` is true, which is its default) 
 > * Otherwise, no exception is raised, even if `TaskGroup.abort()` has been called (the task group consumes its own abort exceptions)
+
+## `bin/examples.dart`
+
+Additional task group examples.
 
 ## `bin/main.dart`
 

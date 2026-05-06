@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:dart_cancel_examples/abort.dart';
+import 'package:dart_cancel_examples/cancellable.dart';
 
 /// Thrown by [TaskGroup.waitAll] and [TaskGroup.waitComplete] when one or more
 /// tasks fail with a non-[AbortException].
@@ -32,7 +33,7 @@ class TaskGroup {
   final AbortController _controller;
   final AbortSignal? _parentSignal;
   final bool _raiseOnTimeout;
-  final Duration? _timeout;
+  Duration? _timeout;
   int _pendingCount = 0;
   bool _spuriousAbort = false;
   bool _didTimeout = false;
@@ -77,8 +78,8 @@ class TaskGroup {
   ///
   /// Exceptions thrown by [body] are collected alongside those of any other
   /// spawned tasks and reported as a single [AggregateException].
-  static Future<void> using(
-    Future<void> Function(TaskGroup) body, {
+  static Future<void> using({
+    required Future<void> Function(TaskGroup) body,
     AbortSignal? parentSignal,
     Duration? timeout,
     bool raiseOnTimeout = true,
@@ -104,13 +105,12 @@ class TaskGroup {
       parentSignal: parentSignal,
       timeout: timeout,
     );
-    final futures = [for (final task in tasks) tg.spawnWithFuture(task)..ignore()];
+    final futures = [for (final task in tasks) tg.spawnWithFuture(task)];
 
     final results = <T>[];
     for (final f in futures) {
-      try {
-        results.add(await f);
-      } catch (_) {}
+      final outcome = await f;
+      if (outcome.success) results.add(outcome.get());
     }
 
     try {
@@ -137,13 +137,21 @@ class TaskGroup {
   bool get didTimeout => _didTimeout;
 
   /// Aborts the group's own cancellation token, cancelling all running tasks.
-  ///
-  /// Throws [StateError] if the group has already completed.
   void abort() {
-    if (completed) {
-      throw StateError('Cannot abort a completed TaskGroup');
-    }
     _controller.abort();
+  }
+
+  /// Replaces any existing timeout with a new one.
+  ///
+  /// Does nothing if the group has already completed.
+  void setTimeout(Duration timeout) {
+    _timeout = timeout;
+    if (completed) return;
+    _timer?.cancel();
+    _timer = Timer(timeout, () {
+      _didTimeout = true;
+      _controller.abort();
+    });
   }
 
   void _checkCompleted() {
@@ -182,24 +190,22 @@ class TaskGroup {
   ///
   /// Use [spawnWithFuture] if you need to await the individual task's result.
   void spawn<T>(Future<T> Function(AbortSignal) task) {
-    spawnWithFuture(task).ignore();
+    spawnWithFuture(task);
   }
 
-  /// Like [spawn], but returns the task's future so the caller can await it.
-  ///
-  /// Errors are also reported through [waitComplete]; callers that do not
-  /// await the returned future should use [spawn] instead to avoid unhandled
-  /// future warnings.
-  Future<T> spawnWithFuture<T>(Future<T> Function(AbortSignal) task) {
+  /// Like [spawn], but returns the task's [Outcome] so the caller can await
+  /// the individual result. The returned future never throws; exceptions are
+  /// wrapped in the [Outcome] and also reported through [waitComplete].
+  Future<Outcome<T>> spawnWithFuture<T>(Future<T> Function(AbortSignal) task) {
     if (_completer?.isCompleted ?? false) {
       throw StateError('Cannot spawn a task on a completed TaskGroup');
     }
     _pendingCount++;
     final future = task(signal);
 
-    Future<T> wrap() async {
+    Future<Outcome<T>> wrap() async {
       try {
-        return await future;
+        return Outcome.succeeded(await future);
       } catch (error, stackTrace) {
         if (error is AbortException) {
           if (!signal.aborted) {
@@ -210,7 +216,7 @@ class TaskGroup {
           _exceptionStackTraces.add(stackTrace);
         }
         _controller.abort();
-        rethrow;
+        return Outcome.failed(error, stackTrace);
       } finally {
         _pendingCount--;
         _checkCompleted();

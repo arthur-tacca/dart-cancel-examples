@@ -243,7 +243,7 @@ Future<void> demoConnectSocket() async {
 Future<void> demoTaskGroup() async {
   print('\n--- TaskGroup.using: all tasks succeed ---');
   final order = <int>[];
-  await TaskGroup.using((tg) async {
+  await TaskGroup.using(body: (tg) async {
     tg.spawn((signal) async {
       await sleep(Duration(milliseconds: 100), signal);
       order.add(1);
@@ -257,7 +257,7 @@ Future<void> demoTaskGroup() async {
 
   print('\n--- TaskGroup.using: one task fails, sibling cancelled ---');
   try {
-    await TaskGroup.using((tg) async {
+    await TaskGroup.using(body: (tg) async {
       tg.spawn((signal) async {
         await sleep(Duration(milliseconds: 200), signal);
         order.add(99); // should not reach here
@@ -274,7 +274,7 @@ Future<void> demoTaskGroup() async {
 
   print('\n--- TaskGroup.using: body itself throws ---');
   try {
-    await TaskGroup.using((tg) async {
+    await TaskGroup.using(body: (tg) async {
       tg.spawn((signal) async {
         await sleep(Duration(milliseconds: 200), signal);
       });
@@ -291,7 +291,7 @@ Future<void> demoTaskGroup() async {
     return 42;
   });
   await tg.waitComplete();
-  print('individual result: ${await fut}');
+  print('individual result: ${(await fut).get()}');
   print('completed: ${tg.completed}');
 
   print('\n--- TaskGroup: waitComplete() called twice returns same future ---');
@@ -320,35 +320,33 @@ Future<void> demoTaskGroup() async {
     print('StateError: $e');
   }
 
-  print('\n--- TaskGroup: abort() after completed throws StateError ---');
+  print('\n--- TaskGroup: abort() after completed sets signal.aborted ---');
   final tg5 = TaskGroup();
   await tg5.waitComplete();
-  try {
-    tg5.abort();
-  } on StateError catch (e) {
-    print('StateError: $e');
-  }
+  print('signal.aborted before: ${tg5.signal.aborted}');
+  tg5.abort();
+  print('signal.aborted after: ${tg5.signal.aborted}');
 
   print('\n--- TaskGroup: parentSignal aborts the group ---');
   final controller = AbortController();
   Future.delayed(Duration(milliseconds: 50), controller.abort);
   try {
-    await TaskGroup.using((tg) async {
+    await TaskGroup.using(parentSignal: controller.signal, body: (tg) async {
       tg.spawn((signal) async {
         await sleep(Duration(seconds: 10), signal);
       });
-    }, parentSignal: controller.signal);
+    });
   } on AbortException {
     print('threw AbortException from parentSignal');
   }
 
   print('\n--- TaskGroup: timeout fires, raiseOnTimeout=true ---');
   try {
-    await TaskGroup.using((tg) async {
+    await TaskGroup.using(timeout: Duration(milliseconds: 50), body: (tg) async {
       tg.spawn((signal) async {
         await sleep(Duration(seconds: 10), signal);
       });
-    }, timeout: Duration(milliseconds: 50));
+    });
   } on TimeoutException {
     print('threw TimeoutException');
   }
@@ -360,6 +358,27 @@ Future<void> demoTaskGroup() async {
   });
   await tg6.waitComplete();
   print('completed normally, didTimeout: ${tg6.didTimeout}');
+
+  print('\n--- TaskGroup: setTimeout() replaces timeout mid-flight ---');
+  try {
+    await TaskGroup.using(body: (tg) async {
+      tg.spawn((signal) async {
+        await sleep(Duration(seconds: 10), signal);
+      });
+      await sleep(Duration(milliseconds: 50));
+      // Replace with a short timeout after some initial work
+      tg.setTimeout(Duration(milliseconds: 50));
+    });
+  } on TimeoutException {
+    print('threw TimeoutException from setTimeout');
+  }
+
+  print('\n--- TaskGroup: setTimeout() after completed is a no-op ---');
+  final tg7 = TaskGroup();
+  await tg7.waitComplete();
+  tg7.setTimeout(Duration(milliseconds: 1));
+  await sleep(Duration(milliseconds: 10));
+  print('no error thrown');
 }
 
 Future<void> demoStreamCancellable() async {
