@@ -54,7 +54,7 @@ it down to each function that you call (and make sure you clean up suitably
 when exceptions are thrown). Often it looks almost identical to a 
 non cancel-aware function. In this version, cancellation is propagated 
 downwards automatically, so you don't even need to pass a token around; 
-often, a function that supports cancellation often really is identical to 
+often, a function that supports cancellation really is identical to 
 how it would be written before cancellation support was added. The 
 second usage example becomes:
 
