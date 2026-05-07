@@ -1,6 +1,33 @@
 import 'dart:async';
 import 'dart:collection';
 
+/// Marker type whose only purpose is to be the runtime-type of the zone key
+/// under which the ambient [AbortSignal] is stored. The class is exposed so
+/// it shows up by name in tooling/debugger output (e.g.
+/// `Zone.current[AbortSignalZoneKey]` makes it obvious which library owns the
+/// entry); the constructor is private, so the only instance that exists is
+/// [_abortSignalZoneKey] inside this library, and no other code can forge
+/// one or shadow our entry by accident.
+class AbortSignalZoneKey {
+  const AbortSignalZoneKey._();
+}
+
+const Object _abortSignalZoneKey = AbortSignalZoneKey._();
+
+/// The ambient [AbortSignal] for the current zone, or null if there isn't one.
+///
+/// Set by [TaskGroup] when a body or task runs inside one of its forked
+/// zones. Cancellable helpers like `sleep`, `waitCancellable`,
+/// `streamCancellable` and `connectSocket` read this directly.
+AbortSignal? get currentSignal =>
+    Zone.current[_abortSignalZoneKey] as AbortSignal?;
+
+/// Returns a child of [Zone.current] in which [signal] is the ambient
+/// [currentSignal]. The only intended caller is [TaskGroup]; it's exposed so
+/// the implementation can keep the zone key itself library-private.
+Zone forkZoneWithSignal(AbortSignal signal) =>
+    Zone.current.fork(zoneValues: {_abortSignalZoneKey: signal});
+
 /// Thrown when an operation is aborted.
 class AbortException implements Exception {
   const AbortException();
@@ -83,38 +110,17 @@ class AbortSignal {
 
 /// Controller that allows aborting requests through its [AbortSignal].
 ///
-/// If [timeout] is supplied, [abort] is called automatically after that
-/// duration. If [linkedSignals] is supplied, [abort] is called when any of
-/// them aborts. In both cases, calling [abort] cancels the timer and removes
-/// registrations on linked signals, avoiding leaks.
+/// In this design timeout-based and combined-signal cancellation are
+/// expressed at the [TaskGroup] layer rather than on individual controllers
+/// (a `TaskGroup`'s `timeout` parameter, plus nesting and explicit
+/// `register(tg.abort)` calls inside a body), so [AbortController] itself is
+/// just a thin owner of an [AbortSignal].
 class AbortController {
   final AbortSignal _signal = AbortSignal._();
-  Timer? _timer;
-  List<AbortSignalRegistration>? _linkedRegistrations;
 
-  AbortController({Duration? timeout, Iterable<AbortSignal>? linkedSignals}) {
-    if (timeout != null) {
-      _timer = Timer(timeout, abort);
-    }
-    if (linkedSignals != null) {
-      final regs = _linkedRegistrations = [];
-      for (final signal in linkedSignals) {
-        if (signal.aborted) {
-          abort();
-          return;
-        }
-        regs.add(signal.register(abort));
-      }
-    }
-  }
+  AbortController();
 
   AbortSignal get signal => _signal;
 
-  void abort() {
-    _timer?.cancel();
-    _timer = null;
-    _linkedRegistrations?.forEach((reg) => reg.unregister());
-    _linkedRegistrations = null;
-    _signal._abort();
-  }
+  void abort() => _signal._abort();
 }

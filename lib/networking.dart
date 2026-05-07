@@ -2,17 +2,15 @@ import 'dart:io';
 
 import 'package:dart_cancel_examples/abort.dart';
 
-/// Connects a [Socket] to [host]:[port], with optional cancellation.
+/// Connects a [Socket] to [host]:[port].
 ///
-/// If [signal] is already aborted when called, throws [AbortException]
-/// immediately. If it is aborted while the connection is in progress, the
-/// attempt is cancelled and [AbortException] is thrown. A genuine connection
-/// error (e.g. refused or unreachable) throws [SocketException] as normal.
-Future<Socket> connectSocket(
-  String host,
-  int port, {
-  AbortSignal? signal,
-}) async {
+/// Reads [currentSignal] at call time. If it's already aborted, throws
+/// [AbortException] immediately. If it aborts while the connection is in
+/// progress, the attempt is cancelled and [AbortException] is thrown. A
+/// genuine connection error (e.g. refused or unreachable) throws
+/// [SocketException] as normal.
+Future<Socket> connectSocket(String host, int port) async {
+  final signal = currentSignal;
   signal?.throwIfAborted();
   final task = await Socket.startConnect(host, port);
   final registration = signal?.register(task.cancel);
@@ -28,19 +26,20 @@ Future<Socket> connectSocket(
   }
 }
 
-/// Connects a [SecureSocket] to [host]:[port], with optional cancellation.
+/// Connects a [SecureSocket] to [host]:[port].
 ///
-/// If [signal] is already aborted when called, throws [AbortException]
-/// immediately. If it is aborted while the connection is in progress, the
-/// attempt is cancelled and [AbortException] is thrown. A genuine connection
-/// error (e.g. refused or unreachable) throws [SocketException] as normal.
+/// Reads [currentSignal] at call time. If it's already aborted, throws
+/// [AbortException] immediately. If it aborts while the connection is in
+/// progress, the attempt is cancelled and [AbortException] is thrown. A
+/// genuine connection error (e.g. refused or unreachable) throws
+/// [SocketException] as normal.
 Future<SecureSocket> connectSecureSocket(
   String host,
   int port, {
   SecurityContext? context,
   bool Function(X509Certificate)? onBadCertificate,
-  AbortSignal? signal,
 }) async {
+  final signal = currentSignal;
   signal?.throwIfAborted();
   final task = await SecureSocket.startConnect(
     host,

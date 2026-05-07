@@ -36,15 +36,14 @@ class Outcome<T> {
       : Error.throwWithStackTrace(exception!, stackTrace!);
 }
 
-/// Waits for [future], wrapping the outcome in a [Outcome].
+/// Waits for [future], wrapping the outcome in an [Outcome].
 ///
-/// If [signal] is aborted before [future] completes, throws [AbortException].
-/// If [signal] is already aborted on entry, returns an immediately-failed
-/// future.
-Future<Outcome<T>> waitCancellable<T>(
-  Future<T> future, [
-  AbortSignal? signal,
-]) {
+/// Reads [currentSignal] at call time. If non-null, aborting it before
+/// [future] completes throws [AbortException]; if it is already aborted on
+/// entry, returns an immediately-failed future. If there is no ambient signal
+/// the wait is uncancellable.
+Future<Outcome<T>> waitCancellable<T>(Future<T> future) {
+  final signal = currentSignal;
   if (signal != null && signal.aborted) {
     return Future.error(const AbortException());
   }
@@ -80,11 +79,22 @@ Future<Outcome<T>> waitCancellable<T>(
   return completer.future;
 }
 
-/// Waits for [duration], throwing [AbortException] if [signal] is aborted
-/// first. Also cancels the underlying timer when aborted.
-Future<void> sleep(Duration duration, [AbortSignal? signal]) {
+/// Waits for [duration]. If [currentSignal] is non-null and aborts before the
+/// timer fires, throws [AbortException] and cancels the timer.
+///
+/// `await sleep(Duration.zero)` (or any non-positive duration) is the
+/// recommended application-code syntax for a cancellation point: it
+/// throws if the ambient signal is already aborted, otherwise resolves
+/// without scheduling a timer. Code that already knows about cancel
+/// tokens — i.e. that registers its own abort callback for some other
+/// reason — should use `currentSignal?.throwIfAborted()` directly.
+Future<void> sleep(Duration duration) {
+  final signal = currentSignal;
   if (signal != null && signal.aborted) {
     return Future.error(const AbortException());
+  }
+  if (duration <= Duration.zero) {
+    return Future.value();
   }
 
   final completer = Completer<void>();
@@ -105,16 +115,18 @@ Future<void> sleep(Duration duration, [AbortSignal? signal]) {
 }
 
 /// Wraps [stream] so that an [AbortException] error is injected and the source
-/// subscription cancelled when [signal] aborts.
+/// subscription cancelled when [currentSignal] (captured at call time) aborts.
 ///
-/// If [signal] is already aborted on entry, returns an immediately-errored
-/// stream.
+/// If there is no ambient signal the source stream is returned unwrapped. If
+/// the ambient signal is already aborted on entry, returns an
+/// immediately-errored stream.
 ///
 /// Note: if the source stream buffers multiple events in a single event loop
 /// turn, some may already be queued in the controller before abort fires,
 /// and would be yielded before the [AbortException]. For well-behaved streams
 /// that deliver at most one event per turn this is not an issue.
-Stream<T> streamCancellable<T>(Stream<T> stream, [AbortSignal? signal]) {
+Stream<T> streamCancellable<T>(Stream<T> stream) {
+  final signal = currentSignal;
   if (signal == null) {
     return stream;
   }
