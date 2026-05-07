@@ -12,6 +12,8 @@ a task group class to allow structured concurrency, and cancellable TCP connect(
 - **Proposal:** https://gist.github.com/arthur-tacca/accbd333a6378619936e34d184b0d152
 - **Discussion:** https://github.com/dart-lang/sdk/issues/63017
 - **Code examples:** https://github.com/arthur-tacca/dart-cancel-examples
+- **Alternative approach (transparent structured concurrency):**
+  https://github.com/arthur-tacca/dart-cancel-examples/tree/transparent-structured-concurrency
 
 ## Contents
 
@@ -88,9 +90,16 @@ class AbortController {
 Creates and owns an `AbortSignal`. The signal is aborted when `abort()` is called, when the `timeout` expires, or when any of the linked signals is aborted. (The linked signals parameter is most often used with a list of length 1, representing a parent operation's signal.)
 
 > [!NOTE]
-> The resources associated with the timeout and linked signals will be cleaned up when the signal is aborted (for any reason). Applications that could use a large number of signals should explicitly call `abort()` on them when they are no longer needed to avoid leaking resources.
+> The resources associated with the timeout (a `Timer`) and linked signals
+> (an `AbortSignalRegistration` closure capturing locals) will be cleaned up 
+> when the signal is aborted (for any reason). Applications that could use a
+> large number of signals should explicitly call `abort()` on them when they
+> are no longer needed to avoid leaking resources.
 >
 > The design originally followed JavaScript's model of having `AbortSignal.timeout()` and `AbortSignal.any()` instead of these parameters on `AbortController`. That design is a bit neater, but gives no interface to clean up resources.
+> 
+> This is not a concern if using task groups. Those automatically clean up 
+> resources (timer and signal registration) when they complete.
 
 ```dart
 class AbortSignal {
@@ -158,6 +167,10 @@ Sleeps for the given duration, like
 [`Timer`](https://api.flutter.dev/flutter/dart-async/Timer-class.html). Can be
 interrupted by the abort signal.
 
+> [!TIP]
+> For a cancellable recurring timer, use
+> [`Stream.periodic()`](https://api.dart.dev/dart-async/Stream/Stream.periodic.html)
+> wrapped in `streamCancellable()`.
 
 ```dart
 Stream<T> streamCancellable<T>(
