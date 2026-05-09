@@ -302,6 +302,7 @@ class TaskGroup {
   AbortSignal get signal;
   bool get completed;
   bool get didTimeout;
+  // bool get abortCaught; - to do (like Trio's cancelled_caught)
   void abort();
   void spawn<T>(Future<T> Function(AbortSignal) task);
   Future<Outcome<T>> spawnWithFuture<T>(Future<T> Function(AbortSignal) task);
