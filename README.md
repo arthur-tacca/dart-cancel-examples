@@ -46,6 +46,23 @@ Future<Uint8List> remoteRead() async {
 }
 ```
 
+> [!NOTE]
+> If [issue #1](https://github.com/arthur-tacca/dart-cancel-examples/issues/1) is implemented you would be able to use a cancel scope, which is more convenient than using an`AbortController` directly:
+> 
+> ```dart
+> Future<Uint8List> remoteRead() async > {
+>   Uint8List? result;
+>   final scope = AbortScope();
+>   mightCallLater(scope.abort);
+>   await scope.using(body: (signal) async {
+>     result = await readBytes('example.com', 8080, 100, signal: signal);
+>   });
+>   if (scope.abortCaught) {
+>     throw MyException("Operation was interrupted");
+>   }
+>   return result!;
+> }
+
 To write a function that supports being cancelled, typically you just have to
 forward the token on to functions that you call, like this:
 
