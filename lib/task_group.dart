@@ -211,6 +211,10 @@ class TaskGroup {
           if (!signal.aborted) {
             _spuriousAbort = true;
           }
+        } else if (error is AggregateException) {
+          // Flatten so that there are no nested AggregateException instances
+          _exceptions.addAll(error.exceptions);
+          _exceptionStackTraces.addAll(error.stackTraces);
         } else {
           _exceptions.add(error);
           _exceptionStackTraces.add(stackTrace);
