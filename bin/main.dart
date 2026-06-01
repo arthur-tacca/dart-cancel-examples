@@ -11,7 +11,6 @@ Future<void> flushMicrotasks() => Future.microtask(() {});
 void main() async {
   await demoBasicCancel();
   await demoRegisterUnregister();
-  await demoAny();
   await demoTimeout();
   await demoWaitCancellable();
   await demoStreamCancellable();
@@ -24,73 +23,61 @@ void main() async {
 
 Future<void> demoBasicCancel() async {
   print('--- basic cancel ---');
-  final controller = CancelController();
-  final cancelToken = controller.cancelToken;
+  final scope = CancelScope();
+  await scope.using((cancelToken) async {
+    cancelToken.register(() => print('cancelled!'));
 
-  cancelToken.register(() => print('cancelled!'));
+    print('cancelled before: ${cancelToken.cancelled}');
+    scope.cancel();
+    print('cancelled after: ${cancelToken.cancelled}'); // true immediately
+    await flushMicrotasks(); // 'cancelled!' prints here
 
-  print('cancelled before: ${cancelToken.cancelled}');
-  controller.cancel();
-  print('cancelled after: ${cancelToken.cancelled}'); // true immediately
-  await flushMicrotasks(); // 'cancelled!' prints here
-
-  try {
-    cancelToken.throwIfCancelled();
-  } on CancelException {
-    print('throwIfCancelled() threw CancelException');
-  }
+    try {
+      cancelToken.throwIfCancelled();
+    } on CancelException {
+      print('throwIfCancelled() threw CancelException');
+    }
+  });
 }
 
 Future<void> demoRegisterUnregister() async {
   print('\n--- register / unregister before cancel ---');
-  final controller = CancelController();
-  final cancelToken = controller.cancelToken;
+  final scope1 = CancelScope();
+  await scope1.using((cancelToken) async {
+    final reg = cancelToken.register(() => print('this should not print'));
+    reg.unregister();
+    scope1.cancel(); // callback was removed before cancel, nothing fires
+    await flushMicrotasks();
 
-  final reg = cancelToken.register(() => print('this should not print'));
-  reg.unregister();
-  controller.cancel(); // callback was removed before cancel, nothing fires
-  await flushMicrotasks();
-
-  try {
-    reg.unregister(); // second call — should throw StateError
-  } on StateError catch (e) {
-    print('double unregister caught: $e');
-  }
+    try {
+      reg.unregister(); // second call — should throw StateError
+    } on StateError catch (e) {
+      print('double unregister caught: $e');
+    }
+  });
 
   print('\n--- unregister after cancel, before microtask fires ---');
-  final controller2 = CancelController();
-  final cancelToken2 = controller2.cancelToken;
-
-  final reg2 = cancelToken2.register(() => print('this should not print either'));
-  controller2.cancel();            // schedules microtask
-  reg2.unregister();              // unregistered before microtask fires
-  await flushMicrotasks();        // microtask checks list != null, skips callback
-  print('callback was suppressed');
-}
-
-Future<void> demoAny() async {
-  print('\n--- CancelController linkedCancelTokens ---');
-  final c1 = CancelController();
-  final c2 = CancelController();
-  final combined = CancelController(linkedCancelTokens: [c1.cancelToken, c2.cancelToken]);
-
-  combined.cancelToken.register(() => print('combined fired'));
-
-  print('combined cancelled before: ${combined.cancelToken.cancelled}');
-  c2.cancel(); // schedules combined.cancel as microtask
-  await flushMicrotasks(); // combined.cancel runs, token is cancelled, 'combined fired' scheduled
-  await flushMicrotasks(); // 'combined fired' prints here
-  print('combined cancelled after: ${combined.cancelToken.cancelled}');
+  final scope2 = CancelScope();
+  await scope2.using((cancelToken) async {
+    final reg = cancelToken.register(() => print('this should not print either'));
+    scope2.cancel();             // schedules microtask
+    reg.unregister();           // unregistered before microtask fires
+    await flushMicrotasks();    // microtask checks list != null, skips callback
+    print('callback was suppressed');
+  });
 }
 
 Future<void> demoTimeout() async {
-  print('\n--- CancelController timeout ---');
-  final controller = CancelController(timeout: Duration(milliseconds: 300));
-  controller.cancelToken.register(() => print('timed out'));
-
-  print('cancelled before wait: ${controller.cancelToken.cancelled}');
-  await Future.delayed(Duration(milliseconds: 500));
-  print('cancelled after wait: ${controller.cancelToken.cancelled}');
+  print('\n--- CancelScope timeout ---');
+  final scope = CancelScope(timeout: Duration(milliseconds: 300));
+  await scope.using((cancelToken) async {
+    cancelToken.register(() => print('timed out'));
+    print('cancelled before wait: ${cancelToken.cancelled}');
+    // Future.delayed doesn't observe the token, so the body completes normally
+    // and the scope absorbs the timeout silently.
+    await Future.delayed(Duration(milliseconds: 500));
+    print('cancelled after wait: ${cancelToken.cancelled}');
+  });
 }
 
 Future<void> demoWaitCancellable() async {
@@ -110,22 +97,26 @@ Future<void> demoWaitCancellable() async {
   }
 
   print('\n--- waitCancellable: cancelled before future completes ---');
-  final controller = CancelController();
+  final scope = CancelScope();
   final slowFuture = Future.delayed(Duration(milliseconds: 500), () => 99);
-  Future.delayed(Duration(milliseconds: 100), controller.cancel);
-  try {
-    await waitCancellable(slowFuture, controller.cancelToken);
-  } on CancelException {
-    print('waitCancellable threw CancelException');
-  }
+  Future.delayed(Duration(milliseconds: 100), scope.cancel);
+  await scope.using((cancelToken) async {
+    try {
+      await waitCancellable(slowFuture, cancelToken);
+    } on CancelException {
+      print('waitCancellable threw CancelException');
+    }
+  });
 
   print('\n--- waitCancellable: already cancelled on entry ---');
-  final controller2 = CancelController()..cancel();
-  try {
-    await waitCancellable(Future.value(1), controller2.cancelToken);
-  } on CancelException {
-    print('waitCancellable threw CancelException immediately');
-  }
+  final scope2 = CancelScope()..cancel();
+  await scope2.using((cancelToken) async {
+    try {
+      await waitCancellable(Future.value(1), cancelToken);
+    } on CancelException {
+      print('waitCancellable threw CancelException immediately');
+    }
+  });
 }
 
 Future<void> demoSleep() async {
@@ -134,21 +125,25 @@ Future<void> demoSleep() async {
   print('sleep completed');
 
   print('\n--- sleep: cancelled before completing ---');
-  final controller = CancelController();
-  Future.delayed(Duration(milliseconds: 50), controller.cancel);
-  try {
-    await sleep(Duration(milliseconds: 500), controller.cancelToken);
-  } on CancelException {
-    print('threw CancelException');
-  }
+  final scope = CancelScope();
+  Future.delayed(Duration(milliseconds: 50), scope.cancel);
+  await scope.using((cancelToken) async {
+    try {
+      await sleep(Duration(milliseconds: 500), cancelToken);
+    } on CancelException {
+      print('threw CancelException');
+    }
+  });
 
   print('\n--- sleep: already cancelled ---');
-  final controller2 = CancelController()..cancel();
-  try {
-    await sleep(Duration(milliseconds: 100), controller2.cancelToken);
-  } on CancelException {
-    print('threw CancelException immediately');
-  }
+  final scope2 = CancelScope()..cancel();
+  await scope2.using((cancelToken) async {
+    try {
+      await sleep(Duration(milliseconds: 100), cancelToken);
+    } on CancelException {
+      print('threw CancelException immediately');
+    }
+  });
 }
 
 Future<void> demoWaitAll() async {
@@ -176,19 +171,21 @@ Future<void> demoWaitAll() async {
   }
 
   print('\n--- waitAll: outer cancelToken cancelled ---');
-  final controller = CancelController();
-  Future.delayed(Duration(milliseconds: 50), controller.cancel);
-  try {
-    await TaskGroup.waitAll(
-      [
-        (cancelToken) async { await sleep(Duration(seconds: 10), cancelToken); return 1; },
-        (cancelToken) async { await sleep(Duration(seconds: 10), cancelToken); return 2; },
-      ],
-      parentCancelToken: controller.cancelToken,
-    );
-  } on CancelException {
-    print('threw CancelException');
-  }
+  final scope = CancelScope();
+  Future.delayed(Duration(milliseconds: 50), scope.cancel);
+  await scope.using((cancelToken) async {
+    try {
+      await TaskGroup.waitAll(
+        [
+          (cancelToken) async { await sleep(Duration(seconds: 10), cancelToken); return 1; },
+          (cancelToken) async { await sleep(Duration(seconds: 10), cancelToken); return 2; },
+        ],
+        parentCancelToken: cancelToken,
+      );
+    } on CancelException {
+      print('threw CancelException');
+    }
+  });
 
   print('\n--- waitAll: cleanUp called on successes when another fails ---');
   try {
@@ -222,19 +219,21 @@ Future<void> demoWaitAny() async {
   }
 
   print('\n--- waitAny: parent cancelToken cancelled ---');
-  final controller = CancelController();
-  Future.delayed(Duration(milliseconds: 30), controller.cancel);
-  try {
-    await TaskGroup.waitAny(
-      [
-        (cancelToken) async { await sleep(Duration(seconds: 10), cancelToken); return 1; },
-        (cancelToken) async { await sleep(Duration(seconds: 10), cancelToken); return 2; },
-      ],
-      parentCancelToken: controller.cancelToken,
-    );
-  } on CancelException {
-    print('threw CancelException');
-  }
+  final scope = CancelScope();
+  Future.delayed(Duration(milliseconds: 30), scope.cancel);
+  await scope.using((cancelToken) async {
+    try {
+      await TaskGroup.waitAny(
+        [
+          (cancelToken) async { await sleep(Duration(seconds: 10), cancelToken); return 1; },
+          (cancelToken) async { await sleep(Duration(seconds: 10), cancelToken); return 2; },
+        ],
+        parentCancelToken: cancelToken,
+      );
+    } on CancelException {
+      print('threw CancelException');
+    }
+  });
 
   print('\n--- waitAny: task fails before any success ---');
   try {
@@ -312,13 +311,14 @@ Future<void> demoConnectSocket() async {
   final server2 = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
   server2.listen((_) {});
   try {
-    final controller = CancelController()..cancel();
-    try {
-      await connectSocket('127.0.0.1', server2.port,
-          cancelToken: controller.cancelToken);
-    } on CancelException {
-      print('threw CancelException immediately');
-    }
+    final scope = CancelScope()..cancel();
+    await scope.using((cancelToken) async {
+      try {
+        await connectSocket('127.0.0.1', server2.port, cancelToken: cancelToken);
+      } on CancelException {
+        print('threw CancelException immediately');
+      }
+    });
   } finally {
     await server2.close();
   }
@@ -330,25 +330,28 @@ Future<void> demoConnectSocket() async {
   // used because port 80/443 are intercepted by transparent proxies in
   // some sandboxed environments. If the connect does somehow succeed,
   // destroy the socket so it doesn't keep the isolate alive past main().
-  final cancelToken = CancelController(timeout: Duration(milliseconds: 100)).cancelToken;
-  try {
-    final socket = await connectSocket('198.51.100.1', 81, cancelToken: cancelToken);
-    socket.destroy();
-    print('unexpectedly connected; socket destroyed');
-  } on CancelException {
-    print('threw CancelException mid-connect');
-  }
+  final scope = CancelScope(timeout: Duration(milliseconds: 100));
+  await scope.using((cancelToken) async {
+    try {
+      final socket = await connectSocket('198.51.100.1', 81, cancelToken: cancelToken);
+      socket.destroy();
+      print('unexpectedly connected; socket destroyed');
+    } on CancelException {
+      print('threw CancelException mid-connect');
+    }
+  });
 }
 
 Future<void> demoTaskGroup() async {
   print('\n--- TaskGroup.using: all tasks succeed ---');
   final order = <int>[];
-  await TaskGroup.using(body: (tg) async {
-    tg.spawn((cancelToken) async {
+  final tgA = TaskGroup();
+  await tgA.using((_) async {
+    tgA.spawn((cancelToken) async {
       await sleep(Duration(milliseconds: 100), cancelToken);
       order.add(1);
     });
-    tg.spawn((cancelToken) async {
+    tgA.spawn((cancelToken) async {
       await sleep(Duration(milliseconds: 50), cancelToken);
       order.add(2);
     });
@@ -357,12 +360,13 @@ Future<void> demoTaskGroup() async {
 
   print('\n--- TaskGroup.using: one task fails, sibling cancelled ---');
   try {
-    await TaskGroup.using(body: (tg) async {
-      tg.spawn((cancelToken) async {
+    final tgB = TaskGroup();
+    await tgB.using((_) async {
+      tgB.spawn((cancelToken) async {
         await sleep(Duration(milliseconds: 200), cancelToken);
         order.add(99); // should not reach here
       });
-      tg.spawn((cancelToken) async {
+      tgB.spawn((cancelToken) async {
         await sleep(Duration(milliseconds: 50), cancelToken);
         throw Exception('task failed');
       });
@@ -374,8 +378,9 @@ Future<void> demoTaskGroup() async {
 
   print('\n--- TaskGroup.using: body itself throws ---');
   try {
-    await TaskGroup.using(body: (tg) async {
-      tg.spawn((cancelToken) async {
+    final tgC = TaskGroup();
+    await tgC.using((_) async {
+      tgC.spawn((cancelToken) async {
         await sleep(Duration(milliseconds: 200), cancelToken);
       });
       throw Exception('body failed');
@@ -407,9 +412,9 @@ Future<void> demoTaskGroup() async {
   tg3.spawn((cancelToken) async {
     await sleep(Duration(seconds: 10), cancelToken);
   });
-  Future.delayed(Duration(milliseconds: 50), tg3.cancel);
+  Future.delayed(Duration(milliseconds: 50), tg3.scope.cancel);
   await tg3.waitComplete();
-  print('completed normally, cancelToken cancelled: ${tg3.cancelToken.cancelled}');
+  print('completed normally, cancelCaught: ${tg3.scope.cancelCaught}');
 
   print('\n--- TaskGroup: spawn() after completed throws StateError ---');
   final tg4 = TaskGroup();
@@ -420,102 +425,98 @@ Future<void> demoTaskGroup() async {
     print('StateError: $e');
   }
 
-  print('\n--- TaskGroup: cancel() after completed sets cancelToken.cancelled ---');
+  print('\n--- TaskGroup: scope.cancel() after completed does not throw ---');
   final tg5 = TaskGroup();
   await tg5.waitComplete();
-  print('cancelToken.cancelled before: ${tg5.cancelToken.cancelled}');
-  tg5.cancel();
-  print('cancelToken.cancelled after: ${tg5.cancelToken.cancelled}');
+  tg5.scope.cancel();
+  print('no error thrown');
 
   print('\n--- TaskGroup: parentCancelToken cancels the group ---');
-  final controller = CancelController();
-  Future.delayed(Duration(milliseconds: 50), controller.cancel);
-  try {
-    await TaskGroup.using(parentCancelToken: controller.cancelToken, body: (tg) async {
-      tg.spawn((cancelToken) async {
-        await sleep(Duration(seconds: 10), cancelToken);
+  final scope = CancelScope();
+  Future.delayed(Duration(milliseconds: 50), scope.cancel);
+  await scope.using((cancelToken) async {
+    try {
+      final tgD = TaskGroup(parentCancelToken: cancelToken);
+      await tgD.using((_) async {
+        tgD.spawn((cancelToken) async {
+          await sleep(Duration(seconds: 10), cancelToken);
+        });
       });
-    });
-  } on CancelException {
-    print('threw CancelException from parentCancelToken');
-  }
+    } on CancelException {
+      print('threw CancelException from parentCancelToken');
+    }
+  });
 
-  print('\n--- TaskGroup: timeout fires, raiseOnTimeout=true ---');
-  try {
-    await TaskGroup.using(timeout: Duration(milliseconds: 50), body: (tg) async {
-      tg.spawn((cancelToken) async {
-        await sleep(Duration(seconds: 10), cancelToken);
-      });
-    });
-  } on TimeoutException {
-    print('threw TimeoutException');
-  }
-
-  print('\n--- TaskGroup: timeout fires, raiseOnTimeout=false ---');
-  final tg6 = TaskGroup(timeout: Duration(milliseconds: 50), raiseOnTimeout: false);
-  tg6.spawn((cancelToken) async {
+  print('\n--- TaskGroup: scope timeout fires, group completes normally ---');
+  final tgE = TaskGroup();
+  tgE.scope.setTimeout(Duration(milliseconds: 50));
+  tgE.spawn((cancelToken) async {
     await sleep(Duration(seconds: 10), cancelToken);
   });
-  await tg6.waitComplete();
-  print('completed normally, didTimeout: ${tg6.didTimeout}');
+  await tgE.waitComplete();
+  print('completed normally, cancelCaught: ${tgE.scope.cancelCaught}');
 
-  print('\n--- TaskGroup: setTimeout() replaces timeout mid-flight ---');
-  try {
-    await TaskGroup.using(body: (tg) async {
-      tg.spawn((cancelToken) async {
-        await sleep(Duration(seconds: 10), cancelToken);
-      });
-      await sleep(Duration(milliseconds: 50));
-      // Replace with a short timeout after some initial work
-      tg.setTimeout(Duration(milliseconds: 50));
+  print('\n--- TaskGroup: setTimeout() mid-flight cancels the group ---');
+  final tgF = TaskGroup();
+  await tgF.using((_) async {
+    tgF.spawn((cancelToken) async {
+      await sleep(Duration(seconds: 10), cancelToken);
     });
-  } on TimeoutException {
-    print('threw TimeoutException from setTimeout');
-  }
+    await sleep(Duration(milliseconds: 50));
+    // Set a short timeout after some initial work
+    tgF.scope.setTimeout(Duration(milliseconds: 50));
+  });
+  print('completed normally, cancelCaught: ${tgF.scope.cancelCaught}');
 
   print('\n--- TaskGroup: setTimeout() after completed is a no-op ---');
   final tg7 = TaskGroup();
   await tg7.waitComplete();
-  tg7.setTimeout(Duration(milliseconds: 1));
+  tg7.scope.setTimeout(Duration(milliseconds: 1));
   await sleep(Duration(milliseconds: 10));
   print('no error thrown');
 }
 
 Future<void> demoStreamCancellable() async {
   print('\n--- streamCancellable: cancelled mid-stream ---');
-  final controller = CancelController();
+  final scope = CancelScope();
 
   // Stream that emits 1, 2, 3 with 200ms gaps
   final source = Stream.periodic(Duration(milliseconds: 200), (i) => i + 1)
       .take(5);
 
   // Cancel after 450ms — should receive 1 and 2, then CancelException
-  Future.delayed(Duration(milliseconds: 450), controller.cancel);
+  Future.delayed(Duration(milliseconds: 450), scope.cancel);
 
-  try {
-    await for (final value in streamCancellable(source, controller.cancelToken)) {
-      print('received: $value');
+  await scope.using((cancelToken) async {
+    try {
+      await for (final value in streamCancellable(source, cancelToken)) {
+        print('received: $value');
+      }
+    } on CancelException {
+      print('stream threw CancelException');
     }
-  } on CancelException {
-    print('stream threw CancelException');
-  }
+  });
 
   print('\n--- streamCancellable: already cancelled on entry ---');
-  final controller2 = CancelController()..cancel();
-  try {
-    await for (final _ in streamCancellable(Stream.value(1), controller2.cancelToken)) {}
-  } on CancelException {
-    print('stream threw CancelException immediately');
-  }
+  final scope2 = CancelScope()..cancel();
+  await scope2.using((cancelToken) async {
+    try {
+      await for (final _ in streamCancellable(Stream.value(1), cancelToken)) {}
+    } on CancelException {
+      print('stream threw CancelException immediately');
+    }
+  });
 
   print('\n--- streamCancellable: source completes before cancel ---');
-  final controller3 = CancelController();
-  final values = <int>[];
-  await for (final v in streamCancellable(
-    Stream.fromIterable([10, 20, 30]),
-    controller3.cancelToken,
-  )) {
-    values.add(v);
-  }
-  print('completed normally, values: $values');
+  final scope3 = CancelScope();
+  await scope3.using((cancelToken) async {
+    final values = <int>[];
+    await for (final v in streamCancellable(
+      Stream.fromIterable([10, 20, 30]),
+      cancelToken,
+    )) {
+      values.add(v);
+    }
+    print('completed normally, values: $values');
+  });
 }

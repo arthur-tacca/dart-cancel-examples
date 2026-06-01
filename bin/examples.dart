@@ -23,7 +23,8 @@ Future<Socket> happyEyeballsConnect(
   Socket? winner;
   final errors = <Object>[];
 
-  await TaskGroup.using(parentCancelToken: cancelToken, body: (tg) async {
+  final tg = TaskGroup(parentCancelToken: cancelToken);
+  await tg.using((_) async {
     for (var i = 0; i < addresses.length; i++) {
       final address = addresses[i];
       final delay = stagger * i;
@@ -35,7 +36,7 @@ Future<Socket> happyEyeballsConnect(
           final socket = await connectSocket(address.address, port, cancelToken: cancelToken);
           if (winner == null) {
             winner = socket;
-            tg.cancel();   // I won — cancel siblings
+            tg.scope.cancel();   // I won — cancel siblings
           } else {
             socket.destroy();   // Lost the race
           }
@@ -74,8 +75,10 @@ Future<void> serve(
   required Future<void> Function(CancelToken) waitForShutdownSignal,
   required Duration shutdownGrace,
 }) async {
-  await TaskGroup.using(body: (connectionTg) async {
-    await TaskGroup.using(parentCancelToken: connectionTg.cancelToken, body: (listenerTg) async {
+  final connectionTg = TaskGroup();
+  await connectionTg.using((connectionCancelToken) async {
+    final listenerTg = TaskGroup(parentCancelToken: connectionCancelToken);
+    await listenerTg.using((listenerCancelToken) async {
       for (final port in ports) {
         listenerTg.spawn((cancelToken) async {
           final server = await ServerSocket.bind('0.0.0.0', port);
@@ -94,10 +97,10 @@ Future<void> serve(
           }
         });
       }
-      await waitForShutdownSignal(listenerTg.cancelToken);
-      listenerTg.cancel();
+      await waitForShutdownSignal(listenerCancelToken);
+      listenerTg.scope.cancel();
     });
-    connectionTg.setTimeout(shutdownGrace);
+    connectionTg.scope.setTimeout(shutdownGrace);
   });
 }
 
