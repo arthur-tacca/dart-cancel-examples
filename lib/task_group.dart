@@ -36,7 +36,9 @@ class TaskGroup {
   Duration? _timeout;
   int _pendingCount = 0;
   bool _spuriousAbort = false;
+  bool _sawLegitimateAbort = false;
   bool _didTimeout = false;
+  bool _abortCaught = false;
   Completer<void>? _completer;
   Timer? _timer;
   AbortSignalRegistration? _parentRegistration;
@@ -127,6 +129,56 @@ class TaskGroup {
     return results;
   }
 
+  /// Runs [tasks] concurrently with shared cancellation, returning the first
+  /// successful result. When any task finishes successfully, the group is
+  /// aborted to cancel the others.
+  ///
+  /// Throws [ArgumentError] if [tasks] is empty.
+  ///
+  /// Successful results are recorded in completion order. If more than one
+  /// task produces a result and the group completes without exception,
+  /// [cleanUp] is applied to every result except the first (the returned one).
+  /// If the group throws, [cleanUp] is applied to every recorded result.
+  static Future<T> waitAny<T>(
+    Iterable<Future<T> Function(AbortSignal)> tasks, {
+    AbortSignal? parentSignal,
+    Duration? timeout,
+    void Function(T)? cleanUp,
+  }) async {
+    final tg = TaskGroup(
+      parentSignal: parentSignal,
+      timeout: timeout,
+    );
+    final results = <T>[];
+    for (final task in tasks) {
+      tg.spawn((signal) async {
+        results.add(await task(signal));
+        tg.abort();
+      });
+    }
+
+    try {
+      await tg.waitComplete();
+    } catch (_) {
+      if (cleanUp != null) {
+        for (final v in results) {
+          cleanUp(v);
+        }
+      }
+      rethrow;
+    }
+
+    if (results.isEmpty) {
+      throw ArgumentError.value(tasks, 'tasks', 'must not be empty');
+    }
+    if (cleanUp != null) {
+      for (var i = 1; i < results.length; i++) {
+        cleanUp(results[i]);
+      }
+    }
+    return results.first;
+  }
+
   /// The shared cancellation signal for all tasks in this group.
   AbortSignal get signal => _controller.signal;
 
@@ -135,6 +187,12 @@ class TaskGroup {
 
   /// Whether the group's [timeout] (if any) fired before completion.
   bool get didTimeout => _didTimeout;
+
+  /// Whether this group absorbed its own cancellation, analogous to Trio's
+  /// `CancelScope.cancelled_caught`. True if at least one task threw
+  /// [AbortException] due to this group's own signal being aborted (not a
+  /// parent signal), and no spurious aborts or other task failures occurred.
+  bool get abortCaught => _abortCaught;
 
   /// Aborts the group's own cancellation token, cancelling all running tasks.
   void abort() {
@@ -171,10 +229,17 @@ class TaskGroup {
       _completer!.completeError(
         AggregateException(_exceptions, _exceptionStackTraces),
       );
-    } else if (_parentSignal?.aborted ?? false) {
-      _completer!.completeError(const AbortException());
-    } else if (didTimeout && _raiseOnTimeout) {
-      _completer!.completeError(TimeoutException('TaskGroup timed out', _timeout));
+    } else if (_sawLegitimateAbort) {
+      if (_parentSignal?.aborted ?? false) {
+        _completer!.completeError(const AbortException());
+      } else {
+        _abortCaught = true;
+        if (didTimeout && _raiseOnTimeout) {
+          _completer!.completeError(TimeoutException('TaskGroup timed out', _timeout));
+        } else {
+          _completer!.complete();
+        }
+      }
     } else {
       _completer!.complete();
     }
@@ -210,6 +275,8 @@ class TaskGroup {
         if (error is AbortException) {
           if (!signal.aborted) {
             _spuriousAbort = true;
+          } else {
+            _sawLegitimateAbort = true;
           }
         } else if (error is AggregateException) {
           // Flatten so that there are no nested AggregateException instances

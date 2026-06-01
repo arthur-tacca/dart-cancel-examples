@@ -17,6 +17,7 @@ void main() async {
   await demoStreamCancellable();
   await demoSleep();
   await demoWaitAll();
+  await demoWaitAny();
   await demoConnectSocket();
   await demoTaskGroup();
 }
@@ -203,6 +204,98 @@ Future<void> demoWaitAll() async {
   }
 }
 
+Future<void> demoWaitAny() async {
+  print('\n--- waitAny: first to finish wins ---');
+  final result = await TaskGroup.waitAny([
+    (signal) async { await sleep(Duration(milliseconds: 100), signal); return 'slow'; },
+    (signal) async { await sleep(Duration(milliseconds: 20),  signal); return 'fast'; },
+    (signal) async { await sleep(Duration(milliseconds: 60),  signal); return 'medium'; },
+  ]);
+  print('result: $result');
+
+  print('\n--- waitAny: empty list throws ArgumentError ---');
+  try {
+    await TaskGroup.waitAny<int>([]);
+    print('did not throw');
+  } on ArgumentError catch (e) {
+    print('threw ArgumentError: $e');
+  }
+
+  print('\n--- waitAny: parent signal aborted ---');
+  final controller = AbortController();
+  Future.delayed(Duration(milliseconds: 30), controller.abort);
+  try {
+    await TaskGroup.waitAny(
+      [
+        (signal) async { await sleep(Duration(seconds: 10), signal); return 1; },
+        (signal) async { await sleep(Duration(seconds: 10), signal); return 2; },
+      ],
+      parentSignal: controller.signal,
+    );
+  } on AbortException {
+    print('threw AbortException');
+  }
+
+  print('\n--- waitAny: task fails before any success ---');
+  try {
+    await TaskGroup.waitAny(<Future<int> Function(AbortSignal)>[
+      (signal) async {
+        await sleep(Duration(milliseconds: 20), signal);
+        throw Exception('task 1 failed');
+      },
+      (signal) async { await sleep(Duration(milliseconds: 200), signal); return 99; },
+    ]);
+  } on AggregateException catch (e) {
+    print('AggregateException with ${e.exceptions.length} exception(s): '
+        '${e.exceptions.first}');
+  }
+
+  print('\n--- waitAny: cleanUp on losing successes ---');
+  // Both tasks ignore the abort signal so both produce results. The second one
+  // races in after the first has triggered abort, so it must be cleaned up.
+  final winner = await TaskGroup.waitAny<String>([
+    (signal) async {
+      await Future.delayed(Duration(milliseconds: 20));
+      return 'resource-A';
+    },
+    (signal) async {
+      await Future.delayed(Duration(milliseconds: 40));
+      return 'resource-B';
+    },
+  ], cleanUp: (v) => print('cleanUp called for: $v'));
+  print('winner: $winner');
+
+  print('\n--- waitAny: cleanUp on all results when group throws ---');
+  // A succeeds at ~20ms; B fails at ~40ms with a non-Abort error.
+  try {
+    await TaskGroup.waitAny<String>([
+      (signal) async {
+        await Future.delayed(Duration(milliseconds: 20));
+        return 'resource-A';
+      },
+      (signal) async {
+        await Future.delayed(Duration(milliseconds: 40));
+        throw Exception('task B failed');
+      },
+    ], cleanUp: (v) => print('cleanUp called for: $v'));
+  } on AggregateException catch (e) {
+    print('AggregateException: ${e.exceptions.first}');
+  }
+
+  print('\n--- waitAny: timeout fires before any task succeeds ---');
+  try {
+    await TaskGroup.waitAny(
+      [
+        (signal) async { await sleep(Duration(seconds: 10), signal); return 1; },
+        (signal) async { await sleep(Duration(seconds: 10), signal); return 2; },
+      ],
+      timeout: Duration(milliseconds: 30),
+    );
+  } on TimeoutException {
+    print('threw TimeoutException');
+  }
+}
+
 Future<void> demoConnectSocket() async {
   print('\n--- connectSocket: normal connect ---');
   final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
@@ -231,10 +324,17 @@ Future<void> demoConnectSocket() async {
   }
 
   print('\n--- connectSocket: aborted during connect ---');
-  // 10.0.0.1 is non-routable here so the connect hangs, letting abort win
+  // 198.51.100.0/24 is RFC 5737 TEST-NET-2, reserved for documentation and
+  // not routed on the public internet, so the SYN goes into the void and
+  // the connect hangs long enough for the 100ms abort to win. Port 81 is
+  // used because port 80/443 are intercepted by transparent proxies in
+  // some sandboxed environments. If the connect does somehow succeed,
+  // destroy the socket so it doesn't keep the isolate alive past main().
   final signal = AbortController(timeout: Duration(milliseconds: 100)).signal;
   try {
-    await connectSocket('10.0.0.1', 80, signal: signal);
+    final socket = await connectSocket('198.51.100.1', 81, signal: signal);
+    socket.destroy();
+    print('unexpectedly connected; socket destroyed');
   } on AbortException {
     print('threw AbortException mid-connect');
   }

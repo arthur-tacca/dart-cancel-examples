@@ -304,7 +304,7 @@ class TaskGroup {
     Duration? timeout,
     bool raiseOnTimeout = true,
   });
-  // bool get abortCaught; - to do (like Trio's cancelled_caught)
+  bool get abortCaught;
   bool get completed;
   bool get didTimeout;
   AbortSignal get signal;
@@ -319,6 +319,12 @@ class TaskGroup {
     bool raiseOnTimeout = true,
   });
   static Future<List<T>> waitAll<T>(
+    Iterable<Future<T> Function(AbortSignal)> tasks, {
+    AbortSignal? parentSignal,
+    Duration? timeout,
+    void Function(T)? cleanUp,
+  });
+  static Future<T> waitAny<T>(
     Iterable<Future<T> Function(AbortSignal)> tasks, {
     AbortSignal? parentSignal,
     Duration? timeout,
