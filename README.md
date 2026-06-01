@@ -121,8 +121,8 @@ Creates and owns an `AbortSignal`. The signal is aborted when `abort()` is calle
 ```dart
 class AbortSignal {
   bool get aborted;
-  void throwIfAborted();
   AbortSignalRegistration register(void Function() callback);
+  void throwIfAborted();
 }
 ```
 The cancel token itself. Obtained from an `AbortController`.
@@ -304,6 +304,14 @@ class TaskGroup {
     Duration? timeout,
     bool raiseOnTimeout = true,
   });
+  // bool get abortCaught; - to do (like Trio's cancelled_caught)
+  bool get completed;
+  bool get didTimeout;
+  AbortSignal get signal;
+  void abort();
+  void spawn<T>(Future<T> Function(AbortSignal) task);
+  Future<Outcome<T>> spawnWithFuture<T>(Future<T> Function(AbortSignal) task);
+  Future<void> waitComplete();
   static Future<void> using({
     required Future<void> Function(TaskGroup) body,
     AbortSignal? parentSignal,
@@ -316,14 +324,6 @@ class TaskGroup {
     Duration? timeout,
     void Function(T)? cleanUp,
   });
-  AbortSignal get signal;
-  bool get completed;
-  bool get didTimeout;
-  // bool get abortCaught; - to do (like Trio's cancelled_caught)
-  void abort();
-  void spawn<T>(Future<T> Function(AbortSignal) task);
-  Future<Outcome<T>> spawnWithFuture<T>(Future<T> Function(AbortSignal) task);
-  Future<void> waitComplete();
 }
 ```
 
