@@ -135,6 +135,12 @@ class CancelException implements Exception {}
 Thrown when an operation is cancelled.
 
 ```dart
+class StrayCancelError extends Error {}
+```
+
+Error thrown when a task threw `CancelException` even though its `CancelToken` was not cancelled.
+
+```dart
 class CancelTokenRegistration {
   void unregister();
 }
@@ -342,7 +348,7 @@ still waits for them all to finish, and new tasks may even still be spawned.
 > [!NOTE]
 > A task group can raise the following exceptions, listed in priority order: 
 >
-> * `StateError` if a task throws `CancelException` despite its `CancelToken` not being cancelled (this is a programming error)
+> * `StrayCancelError` if a task throws `CancelException` despite its `CancelToken` not being cancelled (this is a programming error)
 > * `AggregateException` if any task throws an exception other than `CancelException`
 > * `CancelException` if the parent token is cancelled
 > * `TimeoutException` if the specified timeout expires (and `raiseOnTimeout` is true, which is its default) 

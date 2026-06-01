@@ -222,7 +222,7 @@ class TaskGroup {
     _parentRegistration?.unregister();
     _parentRegistration = null;
     if (_spuriousCancellation) {
-      _completer!.completeError(StateError(
+      _completer!.completeError(StrayCancelError(
         'A task in this TaskGroup threw CancelException without its '
         'CancelToken being cancelled',
       ));

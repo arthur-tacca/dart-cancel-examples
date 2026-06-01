@@ -9,6 +9,17 @@ class CancelException implements Exception {
   String toString() => 'CancelException';
 }
 
+/// Signals a programming error: an operation threw [CancelException] when its
+/// [CancelToken] was never cancelled. A [CancelException] must only be raised
+/// in response to the token actually being cancelled.
+class StrayCancelError extends Error {
+  final String message;
+  StrayCancelError(this.message);
+
+  @override
+  String toString() => 'StrayCancelError: $message';
+}
+
 // Node in CancelToken's linked list of callbacks.
 base class _RegistrationEntry extends LinkedListEntry<_RegistrationEntry> {
   final void Function() callback;
