@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:dart_cancel_examples/abort.dart';
+import 'package:dart_cancel_examples/cancel_core.dart';
 
 /// Connects a [Socket] to [host]:[port], with optional cancellation.
 ///

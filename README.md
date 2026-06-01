@@ -18,7 +18,7 @@ a task group class to allow structured concurrency, and cancellable TCP connect(
 ## Contents
 
 - [Example usage](#example-usage)
-- [`lib/abort.dart`](#libabootdart)
+- [`lib/cancel_core.dart`](#libcancel_coredart)
 - [`lib/cancellable.dart`](#libcancellabledart)
 - [`lib/networking.dart`](#libnetworkingdart)
 - [Task group usage](#task-group-usage)
@@ -90,7 +90,7 @@ Future<Uint8List> readBytes(
 }
 ```
 
-## `lib/abort.dart`
+## `lib/cancel_core.dart`
 
 The core cancellation types.
 

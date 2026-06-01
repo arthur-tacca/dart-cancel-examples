@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:dart_cancel_examples/abort.dart';
+import 'package:dart_cancel_examples/cancel_core.dart';
 
 /// The outcome of a completed operation, capturing either a success value or
 /// a thrown exception.

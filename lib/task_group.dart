@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:dart_cancel_examples/abort.dart';
+import 'package:dart_cancel_examples/cancel_core.dart';
 import 'package:dart_cancel_examples/cancellable.dart';
 
 /// Thrown by [TaskGroup.waitAll] and [TaskGroup.waitComplete] when one or more

@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:dart_cancel_examples/abort.dart';
+import 'package:dart_cancel_examples/cancel_core.dart';
 import 'package:dart_cancel_examples/task_group.dart';
 import 'package:dart_cancel_examples/cancellable.dart';
 import 'package:dart_cancel_examples/networking.dart';
