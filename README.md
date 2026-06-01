@@ -1,24 +1,26 @@
-# Dart cancel tokens code examples 
+# Dart Cancellation & Structured Concurrency Proposal
 
 Part of what makes the [Dart programming language](https://dart.dev) great is its
-excellent async support, but it is in dire need of a unified mechanism for cancellation.
-This repository contains a proposal to add cancel tokens, modelled on [JavaScript's 
-`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) and [C#'s
-`CancellationToken`](https://learn.microsoft.com/en-us/dotnet/standard/threading/cancellation-in-managed-threads).
+excellent async support, but it lacks support for async cancellation. This
+repository contains a proposal and proof-of-concept code to add a unified
+mechanism for cancellation (cancel tokens and cancel scopes) and structured
+concurrency (task groups).
 
-It has a complete implementation of the cancellation token itself, a cancellation scope
-modelled on [Trio's `CancelScope`](https://trio.readthedocs.io/en/stable/reference-core.html#cancellation-and-timeouts),
-a few cancellable waiting primitives, cancellable TCP connect() functions, and a task
-group class to allow structured concurrency.
+* **Discussion:** [dart-lang/sdk#63017](https://github.com/dart-lang/sdk/issues/63017)
+* **Proposal and proof of concept:** https://github.com/arthur-tacca/dart-cancel-examples
+* **Alternative approach (transparent structured concurrency):** https://github.com/arthur-tacca/dart-cancel-examples/tree/transparent-structured-concurrency
 
-**Discussion:** https://github.com/dart-lang/sdk/issues/63017
+The cancel token class is modelled on [JavaScript's
+`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) /
+[C#'s
+`CancellationToken`](https://learn.microsoft.com/en-us/dotnet/standard/threading/cancellation-in-managed-threads),
+while the cancel scope and task group classes are loosely modelled on the
+`CancelScope` and `Nursery` classes in the [groundbreaking library
+Trio](https://trio.readthedocs.io). I highly recommend the articles on the topic
+by Nathaniel J Smith, the creator of Trio:
 
-> [!NOTE]
-> There are three variations of this proposal:
->
-> 1. **`CancelController` based, with explicit token passing:** Modelled on JavaScript's `AbortController` and C#'s `CancellationTokenSource`, this just gives access to the token, with a single method `cancel()` to cancel it. Old revisions of this repo used this; `CancelController` is still present in `cancel_core.dart` for reference.
-> 2. **`CancelScope` based, with explicit token passing:** Inspired by Trio's `CancelScope`, this is really just a glorified `try` / `on CancelException` block, but it's easier and safer to use than option 1 (especially when nesting scopes). This is the option presented below.
-> 3. **`CancelScope` based, with implicit propagation:** More closely modelled on Trio's CancelScope; cancellation propagates automatically to all cancellation-aware async calls within a scope, so no tokens need to be passed around. The code for this is in the [`transparent-structured-concurrency` branch](https://github.com/arthur-tacca/dart-cancel-examples/tree/transparent-structured-concurrency). This is by far the best option but probably not feasible in Dart due to backwards compatibility issues (as explained in that branch's README).
+* [*Timeouts and cancellation for humans*](https://vorpus.org/blog/timeouts-and-cancellation-for-humans/)
+* [*Notes on structured concurrency, or: Go statement considered harmful*](https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/)
 
 ## Contents
 
@@ -30,6 +32,9 @@ group class to allow structured concurrency.
 - [`lib/task_group.dart`](#libtask_groupdart)
 - [`bin/examples.dart`](#binexamplesdart)
 - [`bin/main.dart`](#binmaindart)
+- [`bin/current_api_examples.dart`](#bincurrent_api_examplesdart)
+- [Variations of this proposal](#variations-of-this-proposal)
+- [Why do we need this?](#why-do-we-need-this)
 - [Further development](#further-development)
 - [License](#license)
 
@@ -116,7 +121,7 @@ Thrown when an operation is cancelled.
 class StrayCancelError extends Error {}
 ```
 
-Error thrown when a task threw `CancelException` even though its `CancelToken` was not cancelled.
+Error thrown when a task throws `CancelException` even though its `CancelToken` was not cancelled.
 
 This typically happens when a function correctly throws `CancelException` in response to its `CancelToken`, but the `Future` representing its result has been passed elsewhere and awaited in a different cancel scope. The best way to avoid this is structured concurrency: run tasks in task groups and communicate results by waiting for the task group to finish or use a channel (with the `oneWayChannel()` function).
 
@@ -154,8 +159,8 @@ class CancelScope {
 ```
 
 A cancel scope: creates and owns a `CancelToken`, allows cancelling it with `cancel()`,
-and passes it to the body passed to `using()` (named after `using {...}`
-blocks in C#). The `using()` method may be called only once per scope.
+and passes it to the body passed to `using()` (named after C#'s `using`
+statement). The `using()` method may be called only once per scope.
 Use `cancelCaught` to determine afterwards if this scope was cancelled and
 the body actually raised `CancelException` (analogous to Trio's
 `CancelScope.cancelled_caught`).
@@ -180,16 +185,6 @@ alternative.
 Cancellable wrappers around Dart's core async primitives.
 
 ```dart
-Future<Outcome<T>> waitCancellable<T>(
-  Future<T> future, [
-  CancelToken? cancelToken,
-]);
-```
-Waits for a [Future](https://api.dart.dev/dart-async/Future-class.html) to complete,
-returning outcome as an `Outcome`. The wait can be interrupted with the cancel
-token (but this does not cancel the function underlying the future).
-
-```dart
 class Outcome<T> {
   final bool success;
   final T? result;
@@ -197,9 +192,14 @@ class Outcome<T> {
   final StackTrace? stackTrace;
   T get();
 }
+Future<Outcome<T>> waitCancellable<T>(
+  Future<T> future, [
+  CancelToken? cancelToken,
+]);
 ```
-Captures the outcome of a `waitCancellable` call: either a success value or a
-thrown exception with its original stack trace. `get()` returns the value or
+Waits for a [Future](https://api.dart.dev/dart-async/Future-class.html) to complete,
+returning the outcome as an `Outcome`. The wait can be interrupted with the cancel
+token (but this does not cancel the function underlying the future). `Outcome.get()` returns the value or
 re-throws with the original stack trace.
 
 > [!NOTE]
@@ -214,7 +214,7 @@ Future<void> sleep(
 Sleeps for the given duration, like 
 [`Future.delayed`](https://api.dart.dev/dart-async/Future/Future.delayed.html)
 (without the computation parameter) or
-[`Timer`](https://api.flutter.dev/flutter/dart-async/Timer-class.html). Can be
+[`Timer`](https://api.dart.dev/dart-async/Timer-class.html). Can be
 interrupted by the cancel token.
 
 > [!TIP]
@@ -285,7 +285,7 @@ Cancellable TCP socket connections, built on
 [`Socket.startConnect`](https://api.dart.dev/dart-io/Socket/startConnect.html) and
 [`SecureSocket.startConnect`](https://api.dart.dev/dart-io/SecureSocket/startConnect.html).
 
-The socket interface in Dart is stream based, which is problematic in some ways, but it means that most of the cancellation support comes almost for free.
+The socket interface in Dart is stream-based, which is problematic in some ways, but it means that most of the cancellation support comes almost for free.
 
 * Listening for incoming connections to a socket server uses `Stream` so can be cancelled with `streamCancellable()`.
 * Reading from a socket uses `Stream` so can be cancelled with `streamCancellable()`.
@@ -294,14 +294,14 @@ The socket interface in Dart is stream based, which is problematic in some ways,
 
 ## Task group usage
 
-The `TaskGroup` class encapsulates a safe wait for multiple concurrent tasks; if one throws an exception then the others are cancelled (with a `CancelToken`) and the task group continues to wait for them to complete. This technique is called structured concurrency, introduced in the excellent article [*Go statement considered harmful*](https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/).
+The `TaskGroup` class encapsulates a safe wait for multiple concurrent tasks; if one throws an exception then the others are cancelled (with a `CancelToken`) and the task group continues to wait for them to complete. This technique is called structured concurrency.
 
 You use a `TaskGroup` like this:
 
 ```dart
 Future<Map<String, Uint8List>> remoteReads() async {
   final results = <String, Uint8List>{};
-  TaskGroup taskGroup = TaskGroup();
+  final taskGroup = TaskGroup();
   taskGroup.spawn((cancelToken) async {
     results['alpha'] = await readBytes('alpha.example.com', 8080, 100, cancelToken: cancelToken);
   });
@@ -316,7 +316,7 @@ Future<Map<String, Uint8List>> remoteReads() async {
 The member method `TaskGroup.using()` is a helper that allows using a task group like a scope, like in most other languages that support structured concurrency. It spawns the body as a member task and waits for every task in the group, which is particularly useful for nesting multiple task groups correctly. Use it like this:
 
 ```dart
-Future<Map<String, Uint8List>> remoteReads() async {
+Future<Map<String, Uint8List>> readBytesMultiple() async {
   final results = <String, Uint8List>{};
   final taskGroup = TaskGroup();
   await taskGroup.using((_) async {
@@ -334,7 +334,7 @@ Future<Map<String, Uint8List>> remoteReads() async {
 The static method `TaskGroup.waitAll()` allows waiting for a fixed length list of tasks, similar to [`Future.wait()`](https://api.dart.dev/dart-async/Future/wait.html), which is useful when you don't need the full flexibility of `TaskGroup`. It uses a `TaskGroup` under the hood so it follows all the same rules when tasks throw an exception. This resolves the dilemma posed by the `eagerError` parameter on `Future.wait()`: if `false` then it could wait a long time to report an error, but if `true` then it gives no way to know when all tasks have finished. In contrast, `TaskGroup.waitAll()` waits until all tasks are done, but should return promptly after an error (if they handle cancellation suitably). Use it like this: 
 
 ```dart
-Future<List<Uint8List>> remoteReads() async {
+Future<List<Uint8List>> readBytesMultiple() async {
   return await TaskGroup.waitAll([
     (cancelToken) => readBytes('alpha.example.com', 8080, 100, cancelToken: cancelToken),
     (cancelToken) => readBytes('beta.example.com', 8080, 100, cancelToken: cancelToken),
@@ -417,14 +417,175 @@ Additional task group examples.
 
 A scratch file for manually testing and exercising the code in the other files.
 
+## `bin/current_api_examples.dart`
+
+`readBytes()` implemented with Dart's current cancellation API
+([`CancelableOperation`](https://pub.dev/documentation/async/latest/async/CancelableOperation-class.html)
+/ [`CancelableCompleter`](https://pub.dev/documentation/async/latest/async/CancelableCompleter-class.html)),
+as a foil to the token-based version above; see [Why do we need this?](#why-do-we-need-this).
+
+
+## Variations of this proposal
+
+There are three variations of this proposal. Each is illustrated below with the
+same `readWithCancel()` example from [Example usage](#example-usage).
+
+1. **`CancelController` based, with explicit token passing:** Modelled on
+   JavaScript's `AbortController` and C#'s `CancellationTokenSource`, this just
+   gives access to the token, with a single method `cancel()` to cancel it. Old
+   revisions of this repo used this; `CancelController` is still present in
+   `cancel_core.dart` for reference.
+
+   ```dart
+   Future<Uint8List> readWithCancel() async {
+     final controller = CancelController();
+     mightCallLater(() => controller.cancel());
+     try {
+       return await readBytes('example.com', 8080, 100, cancelToken: controller.cancelToken);
+     } on CancelException {
+       // It's rude to let an internal CancelException leak out of a function
+       throw MyException("Operation was interrupted");
+     }
+   }
+   ```
+
+2. **`CancelScope` based, with explicit token passing:** Inspired by Trio's
+   `CancelScope`, this is really just a glorified `try` / `on CancelException`
+   block, but it's easier and safer to use than option 1, especially when nesting
+   scopes. This is the option presented in this repo.
+
+   ```dart
+   Future<Uint8List> readWithCancel() async {
+     final scope = CancelScope();
+     mightCallLater(() => scope.cancel());
+     Uint8List? result;
+     await scope.using((cancelToken) async {
+       result = await readBytes('example.com', 8080, 100, cancelToken: cancelToken);
+     });
+     if (scope.cancelCaught) {
+       throw MyException("Operation was interrupted");
+     }
+     return result!;
+   }
+   ```
+
+3. **`CancelScope` based, with implicit propagation:** More closely modelled on
+   Trio's `CancelScope`; cancellation propagates automatically to all
+   cancellation-aware async calls within a scope, so no tokens need to be passed
+   around. The code for this is in the
+   [`transparent-structured-concurrency` branch](https://github.com/arthur-tacca/dart-cancel-examples/tree/transparent-structured-concurrency).
+   This is by far the best option but probably not feasible in Dart due to
+   backwards compatibility issues (as explained in that branch's README).
+
+   ```dart
+   Future<Uint8List> readWithCancel() async {
+     Uint8List? result;
+     final scope = CancelScope();
+     mightCallLater(scope.cancel);
+     await scope.using(() async {
+       result = await readBytes('example.com', 8080, 100);
+     });
+     if (scope.cancelCaught) {
+       throw MyException("Operation was interrupted");
+     }
+     return result!;
+   }
+   ```
+
+"Structured concurrency" is usually associated with implicit propagation of
+cancellation (variation 3). This proposal supports structured concurrency even with the
+cancel token approach (variations 1 and 2), albeit with some slightly error-prone extra boilerplate.
+
+## Why do we need this?
+
+Dart already has a cancellation API: [`CancelableOperation`](https://pub.dev/documentation/async/latest/async/CancelableOperation-class.html). For a *caller*, it works reasonably well:
+
+```dart
+Future<Uint8List> readWithCancel() async {
+  final op = readBytes('example.com', 8080, 100);
+  mightCallLater(() => unawaited(op.cancel()));
+  final data = await op.valueOrCancellation();
+  if (!op.isCanceled) {
+    return data!;
+  } else {
+    throw MyException('Operation was interrupted');
+  }
+}
+```
+
+The real trouble starts when you want to compose more than one thing that can be cancelled, as in the implementation of `readBytes()`:
+
+```dart
+CancelableOperation<Uint8List> readBytes(String host, int port, int byteCount) {
+  ConnectionTask<Socket>? connectTask;
+  StreamSubscription<Uint8List>? subscription;
+  Completer<void>? readDone;
+
+  final completer = CancelableCompleter<Uint8List>(
+    onCancel: () {
+      connectTask?.cancel();
+      subscription?.cancel();
+      readDone?.completeError(
+        SocketException('Operation cancelled'),
+      );
+    },
+  );
+
+  () async {
+    Socket? socket;
+    try {
+      connectTask = await Socket.startConnect(host, port);
+      socket = await connectTask!.socket;
+
+      final buffer = BytesBuilder(copy: false);
+      readDone = Completer<void>();
+
+      subscription = socket.listen(
+        (chunk) {
+          buffer.add(chunk);
+          if (buffer.length >= byteCount) {
+            subscription!.cancel();
+            readDone!.complete();
+          }
+        },
+        onError: (e, st) {
+          readDone!.completeError(e, st);
+        },
+        onDone: () {
+          readDone!.completeError(
+            SocketException('Connection closed before $byteCount bytes received'),
+          );
+        },
+        cancelOnError: true,
+      );
+
+      await readDone!.future;
+
+      completer.complete(buffer.takeBytes());
+    } catch (e, st) {
+      completer.completeError(e, st);
+    } finally {
+      socket?.destroy();
+    }
+  }();
+
+  return completer.operation;
+}
+```
+
+This is much more complex than the [token-based `readBytes()`](#example-usage); the actual logic is drowned out by cancellation admin.
+Yet, despite that effort, it's still wrong! It has
+two subtle bugs that just cannot arise in the cancel token version. Can you spot them?
+They are explained and fixed (I think!) in [`bin/current_api_examples.dart`](bin/current_api_examples.dart).
+I don't think this is a viable mechanism for production-quality code.
 
 ## Further development
 
 This code is already useful as it stands. But there are a few potential additions that could further improve it (besides tests and documentation!):
 
 * **New base class for `CancelException`:** In this code, `CancelException` derives from `Exception` but that means it will be caught by any blanket `catch (Exception)` blocks. Ideally, Dart would introduce a new `BaseException` class, a shared base for `Exception` and `Error`, and `CancelException` could derive from that directly. As a bonus, if Dart later puts traceback information in the exception (where it belongs!), or adds exception chaining, then this gives a central place to put it. (This is inspired by Python's `BaseException`, which asyncio and Trio both use as the direct base for their cancellation exceptions.)
-* **Support cancellable HTTP and web sockets:** Cancellation tokens finally give a natural way to specify when `HttpClient.getUrl()` and others should cancel (see https://github.com/dart-lang/sdk/issues/51267 – which actually suggests `AbortSignal`!). I haven't thought through the implications to the http API (e.g. should the cancel token passed to a request method be inherited by close() or should that take its own? And it looks like there needs to be a synchronous method to close a request that doesn't depend on whether it's got to response stage).  
-* **Passing cancel tokens between isolates:** This is a bit more specialised, but would help with cancelling work delegated to other isolates. It would be a lot more intrusive than the other changes described here so it might be worth making it more general e.g. supporting a general [event object](https://en.wikipedia.org/wiki/Event_(computing)) passed between isolates (which is what a cancel token essentially is). This is safe so long as the destination can only read the value (i.e. for cancel tokens, you can only pass the token not the controller) and so long as it can't be unset (uncancelled). It should be possible to see an update without an event loop iteration, so that it's possible to interrupt a long running CPU operation if the user's code polls it occasionally.
+* **Support cancellable HTTP and web sockets:** Cancellation tokens finally give a natural way to specify when `HttpClient.getUrl()` and others should cancel (see https://github.com/dart-lang/sdk/issues/51267 – which suggests cancel tokens!). I haven't thought through the implications to the http API (e.g. should the cancel token passed to a request method be inherited by close() or should that take its own? And it looks like there needs to be a synchronous method to close a request that doesn't depend on whether it's got to response stage).  
+* **Passing cancel tokens between isolates:** This is a bit more specialised, but would help with cancelling work delegated to other isolates. It would be a lot more intrusive than the other changes described here so it might be worth making it more general e.g. supporting a general [event object](https://en.wikipedia.org/wiki/Event_(computing)) passed between isolates (which is what a cancel token essentially is). This is safe so long as the destination can only read the value (i.e. for cancel tokens, you can only pass the token not the controller) and so long as it can't be unset (uncancelled). It should be possible to see an update without an event loop iteration, so that it's possible to interrupt a long-running CPU operation if the user's code polls it occasionally.
 
 ## License 
 

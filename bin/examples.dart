@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:io';
 
 import 'package:dart_cancel_examples/cancel_core.dart';
@@ -20,41 +21,55 @@ Future<Socket> happyEyeballsConnect(
     throw SocketException('No addresses resolved for $host');
   }
 
-  Socket? winner;
+  final winners = Queue<Socket>();
   final errors = <Object>[];
 
   final tg = TaskGroup(parentCancelToken: cancelToken);
-  await tg.using((_) async {
-    for (var i = 0; i < addresses.length; i++) {
-      final address = addresses[i];
-      final delay = stagger * i;
-      tg.spawn((cancelToken) async {
-        try {
-          if (delay > Duration.zero) {
-            await sleep(delay, cancelToken);
-          }
-          final socket = await connectSocket(address.address, port, cancelToken: cancelToken);
-          if (winner == null) {
-            winner = socket;
-            tg.scope.cancel();   // I won — cancel siblings
-          } else {
-            socket.destroy();   // Lost the race
-          }
-        } on CancelException {
-          rethrow;
-        } catch (e) {
-          errors.add(e);   // Let siblings keep racing
+  try {
+    await tg.using((groupToken) async {
+      Future<Outcome<void>>? previous;
+      for (var i = 0; i < addresses.length; i++) {
+        if (previous != null) {
+          // Wait until the previously-spawned attempt finishes, capped at
+          // `stagger`. The gate is a child of the group token, so its timeout
+          // provides the cap while waitCancellable lets the attempt finishing
+          // early (a fast failure or a connect) cut the wait short.
+          await CancelScope(parentCancelToken: groupToken, timeout: stagger).using((token) async {
+            await waitCancellable(previous!, token);
+          });
+          // If another attempt won (cancelling the group) during the wait,
+          // stop spawning the rest.
+          groupToken.throwIfCancelled();
         }
-      });
-    }
-  });
+        final address = addresses[i];
+        previous = tg.spawnWithFuture((cancelToken) async {
+          try {
+            final socket = await connectSocket(address.address, port, cancelToken: cancelToken);
+            winners.add(socket);   // connected — record it...
+            tg.scope.cancel();     // ...and cancel the stragglers
+          } on SocketException catch (e) {
+            errors.add(e);   // Connection failed — let siblings keep racing
+          }
+        });
+      }
+    });
 
-  if (winner == null) {
-    throw SocketException(
-      'Could not connect to $host:$port (${errors.length} attempt(s) failed)',
-    );
+    if (winners.isEmpty) {
+      throw SocketException(
+        'Could not connect to $host:$port (${errors.length} attempt(s) failed)',
+      );
+    }
+    // First to connect is the race winner. Remove it so the finally below
+    // doesn't destroy it; anything still queued is a straggler.
+    return winners.removeFirst();
+  } finally {
+    // Reached on every exit. Success: stragglers that also connected. Throw
+    // (parent cancellation, or no winner): every socket that connected. None
+    // of these are being returned, so close them.
+    for (final socket in winners) {
+      socket.destroy();
+    }
   }
-  return winner!;
 }
 
 Future<void> runHappyEyeballs() async {
