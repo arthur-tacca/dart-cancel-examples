@@ -228,9 +228,39 @@ Stream<T> streamCancellable<T>(
   CancelToken? cancelToken,
 ]);
 ```
-Wraps a [Stream](https://api.dart.dev/dart-async/Stream-class.html) so that a
-`CancelException` is injected and the source subscription cancelled when the
-token is cancelled.
+Wraps a [`Stream`](https://api.dart.dev/dart-async/Stream-class.html) so that a `CancelException` is injected and the source subscription cancelled when the token is cancelled.
+
+This allows interrupting an `await for` while waiting for the next item in the
+underlying stream. For example, if used on a `Stream.periodic()` stream with a
+duration of 200ms and a cancel token that is cancelled after 500ms, the stream
+will deliver an item after 200ms, then another after another 200ms, then throw
+`CancelException` after another 100ms.
+
+> [!WARNING]
+> `streamCancellable()` uses
+> [`StreamSubscription.cancel()`](https://api.dart.dev/dart-async/StreamSubscription/cancel.html),
+> so it only works if the stream reacts promptly to cancellation. **It does not
+> work for `async*` generators:** they don't react until their next item is
+> ready, so cancellation is delayed as long as it takes to fetch the next item
+> (possibly indefinitely). `streamCancellable()` can also lose an item that
+> arrives just as it's cancelled. Again, this is worse for `async*` generators,
+> which always fetch and discard their next item when interrupted by stream
+> cancellation.
+>
+> For `async*` generators, slow-to-cancel streams, or anywhere you need
+> guaranteed delivery, you should support cancel tokens in the stream itself
+> instead. See [`generators.md`](generators.md) for details.
+
+```dart
+({Stream<T> stream, StreamSink<T> sink}) oneWayChannel<T>([
+  CancelToken? cancelToken,
+  bool drainOnCancel = true,
+]);
+```
+
+Creates a multi-producer single-consumer (MPSC) queue, similar to those in many other async runtimes (e.g. [tokio mpsc](https://docs.rs/tokio/latest/tokio/sync/mpsc/) or [Trio memory channels](https://trio.readthedocs.io/en/stable/reference-core.html#using-channels-to-pass-values-between-tasks)). It's a bit like a one-way version of Dart's [`StreamChannel`](https://pub.dev/documentation/stream_channel/latest/stream_channel/). It's often useful for passing messages between different async tasks in a task group; each one makes its own channel and listens to it, and makes it available for other tasks to write to.
+
+The implementation is simple: it's essentially just a [`StreamController`](https://api.dart.dev/dart-async/StreamController-class.html) with the `stream` and `sink` properties returned, and a bit of admin to wire up the cancellation to send a `CancelException` (before or after queued items, depending on `drainOnCancel`) and close the stream.
 
 ## `lib/networking.dart`
 

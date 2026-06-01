@@ -14,6 +14,7 @@ void main() async {
   await demoTimeout();
   await demoWaitCancellable();
   await demoStreamCancellable();
+  await demoOneWayChannel();
   await demoSleep();
   await demoWaitAll();
   await demoWaitAny();
@@ -518,5 +519,59 @@ Future<void> demoStreamCancellable() async {
       values.add(v);
     }
     print('completed normally, values: $values');
+  });
+}
+
+Future<void> demoOneWayChannel() async {
+  print('\n--- oneWayChannel: basic produce / consume ---');
+  final ch = oneWayChannel<int>();
+  ch.sink.add(1);
+  ch.sink.add(2);
+  ch.sink.add(3);
+  ch.sink.close(); // ends the consumer's await for
+  final received = <int>[];
+  await for (final v in ch.stream) {
+    received.add(v);
+  }
+  print('received: $received'); // [1, 2, 3]
+
+  print('\n--- oneWayChannel: cancel drains buffered items (default) ---');
+  final scope = CancelScope();
+  await scope.using((cancelToken) async {
+    final ch2 = oneWayChannel<int>(cancelToken);
+    ch2.sink.add(1);
+    ch2.sink.add(2);
+    scope.cancel();
+    final received2 = <int>[];
+    try {
+      await for (final v in ch2.stream) {
+        received2.add(v);
+      }
+    } on CancelException {
+      print('drained $received2 then threw CancelException'); // [1, 2]
+    }
+    // The channel is now closed, so producers are barred.
+    try {
+      ch2.sink.add(99);
+    } on StateError {
+      print('sink.add after close threw StateError');
+    }
+  });
+
+  print('\n--- oneWayChannel: cancel drops buffered items (drainOnCancel: false) ---');
+  final scope2 = CancelScope();
+  await scope2.using((cancelToken) async {
+    final ch3 = oneWayChannel<int>(cancelToken, false);
+    ch3.sink.add(1);
+    ch3.sink.add(2);
+    scope2.cancel();
+    final received3 = <int>[];
+    try {
+      await for (final v in ch3.stream) {
+        received3.add(v);
+      }
+    } on CancelException {
+      print('dropped buffered items, received $received3 then CancelException'); // []
+    }
   });
 }
