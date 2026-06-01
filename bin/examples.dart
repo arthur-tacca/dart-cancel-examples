@@ -10,10 +10,10 @@ import 'package:dart_cancel_examples/task_group.dart';
 Future<Socket> happyEyeballsConnect(
   String host,
   int port, {
-  AbortSignal? signal,
+  CancelToken? cancelToken,
   Duration stagger = const Duration(milliseconds: 250),
 }) async {
-  signal?.throwIfAborted();
+  cancelToken?.throwIfCancelled();
 
   final addresses = await InternetAddress.lookup(host);
   if (addresses.isEmpty) {
@@ -23,23 +23,23 @@ Future<Socket> happyEyeballsConnect(
   Socket? winner;
   final errors = <Object>[];
 
-  await TaskGroup.using(parentSignal: signal, body: (tg) async {
+  await TaskGroup.using(parentCancelToken: cancelToken, body: (tg) async {
     for (var i = 0; i < addresses.length; i++) {
       final address = addresses[i];
       final delay = stagger * i;
-      tg.spawn((sig) async {
+      tg.spawn((cancelToken) async {
         try {
           if (delay > Duration.zero) {
-            await sleep(delay, sig);
+            await sleep(delay, cancelToken);
           }
-          final socket = await connectSocket(address.address, port, signal: sig);
+          final socket = await connectSocket(address.address, port, cancelToken: cancelToken);
           if (winner == null) {
             winner = socket;
-            tg.abort();   // I won — cancel siblings
+            tg.cancel();   // I won — cancel siblings
           } else {
             socket.destroy();   // Lost the race
           }
-        } on AbortException {
+        } on CancelException {
           rethrow;
         } catch (e) {
           errors.add(e);   // Let siblings keep racing
@@ -70,20 +70,20 @@ Future<void> runHappyEyeballs() async {
 
 Future<void> serve(
   List<int> ports, {
-  required Future<void> Function(Socket, AbortSignal) handleConnection,
-  required Future<void> Function(AbortSignal) waitForShutdownSignal,
+  required Future<void> Function(Socket, CancelToken) handleConnection,
+  required Future<void> Function(CancelToken) waitForShutdownSignal,
   required Duration shutdownGrace,
 }) async {
   await TaskGroup.using(body: (connectionTg) async {
-    await TaskGroup.using(parentSignal: connectionTg.signal, body: (listenerTg) async {
+    await TaskGroup.using(parentCancelToken: connectionTg.cancelToken, body: (listenerTg) async {
       for (final port in ports) {
-        listenerTg.spawn((signal) async {
+        listenerTg.spawn((cancelToken) async {
           final server = await ServerSocket.bind('0.0.0.0', port);
           try {
-            await for (final socket in streamCancellable(server, signal)) {
-              connectionTg.spawn((signal) async {
+            await for (final socket in streamCancellable(server, cancelToken)) {
+              connectionTg.spawn((cancelToken) async {
                 try {
-                  await handleConnection(socket, signal);
+                  await handleConnection(socket, cancelToken);
                 } finally {
                   socket.destroy();
                 }
@@ -94,8 +94,8 @@ Future<void> serve(
           }
         });
       }
-      await waitForShutdownSignal(listenerTg.signal);
-      listenerTg.abort();
+      await waitForShutdownSignal(listenerTg.cancelToken);
+      listenerTg.cancel();
     });
     connectionTg.setTimeout(shutdownGrace);
   });
@@ -104,12 +104,12 @@ Future<void> serve(
 Future<void> runServe() async {
   await serve(
     [8080],
-    handleConnection: (socket, signal) async {
-      await for (final data in streamCancellable(socket, signal)) {
+    handleConnection: (socket, cancelToken) async {
+      await for (final data in streamCancellable(socket, cancelToken)) {
         socket.add(data);
       }
     },
-    waitForShutdownSignal: (signal) => sleep(Duration(seconds: 30), signal),
+    waitForShutdownSignal: (cancelToken) => sleep(Duration(seconds: 30), cancelToken),
     shutdownGrace: Duration(seconds: 5),
   );
 }

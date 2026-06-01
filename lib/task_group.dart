@@ -4,9 +4,9 @@ import 'package:dart_cancel_examples/cancel_core.dart';
 import 'package:dart_cancel_examples/cancellable.dart';
 
 /// Thrown by [TaskGroup.waitAll] and [TaskGroup.waitComplete] when one or more
-/// tasks fail with a non-[AbortException].
+/// tasks fail with a non-[CancelException].
 class AggregateException implements Exception {
-  /// The non-[AbortException] exceptions thrown by tasks, in receipt order.
+  /// The non-[CancelException] exceptions thrown by tasks, in receipt order.
   final List<Object> exceptions;
 
   /// The stack traces corresponding to each entry in [exceptions].
@@ -21,7 +21,7 @@ class AggregateException implements Exception {
 }
 
 /// A dynamically-growable group of concurrent tasks sharing a cancellation
-/// signal. Tasks can be added at any point before [waitComplete] completes.
+/// token. Tasks can be added at any point before [waitComplete] completes.
 class TaskGroup {
   static final _finalizer = Finalizer<StackTrace>((creationTrace) {
     throw StateError(
@@ -30,47 +30,47 @@ class TaskGroup {
     );
   });
 
-  final AbortController _controller;
-  final AbortSignal? _parentSignal;
+  final CancelController _controller;
+  final CancelToken? _parentCancelToken;
   final bool _raiseOnTimeout;
   Duration? _timeout;
   int _pendingCount = 0;
-  bool _spuriousAbort = false;
-  bool _sawLegitimateAbort = false;
+  bool _spuriousCancellation = false;
+  bool _sawLegitimateCancellation = false;
   bool _didTimeout = false;
-  bool _abortCaught = false;
+  bool _cancelCaught = false;
   Completer<void>? _completer;
   Timer? _timer;
-  AbortSignalRegistration? _parentRegistration;
+  CancelTokenRegistration? _parentRegistration;
   final _exceptions = <Object>[];
   final _exceptionStackTraces = <StackTrace>[];
   final _creationTrace = StackTrace.current;
 
-  /// Creates a task group. If [parentSignal] is supplied, aborting it also
-  /// aborts this group. If [timeout] is supplied, the group is aborted after
+  /// Creates a task group. If [parentCancelToken] is supplied, cancelling it also
+  /// cancels this group. If [timeout] is supplied, the group is cancelled after
   /// that duration; if [raiseOnTimeout] is true (the default) a
   /// [TimeoutException] is thrown by [waitComplete], otherwise it completes
   /// normally with [didTimeout] set to true.
   TaskGroup({
-    AbortSignal? parentSignal,
+    CancelToken? parentCancelToken,
     Duration? timeout,
     bool raiseOnTimeout = true,
-  })  : _controller = AbortController(),
-        _parentSignal = parentSignal,
+  })  : _controller = CancelController(),
+        _parentCancelToken = parentCancelToken,
         _raiseOnTimeout = raiseOnTimeout,
         _timeout = timeout {
     _finalizer.attach(this, _creationTrace, detach: this);
-    if (parentSignal != null) {
-      if (parentSignal.aborted) {
-        _controller.abort();
+    if (parentCancelToken != null) {
+      if (parentCancelToken.cancelled) {
+        _controller.cancel();
       } else {
-        _parentRegistration = parentSignal.register(_controller.abort);
+        _parentRegistration = parentCancelToken.register(_controller.cancel);
       }
     }
     if (timeout != null) {
       _timer = Timer(timeout, () {
         _didTimeout = true;
-        _controller.abort();
+        _controller.cancel();
       });
     }
   }
@@ -82,12 +82,12 @@ class TaskGroup {
   /// spawned tasks and reported as a single [AggregateException].
   static Future<void> using({
     required Future<void> Function(TaskGroup) body,
-    AbortSignal? parentSignal,
+    CancelToken? parentCancelToken,
     Duration? timeout,
     bool raiseOnTimeout = true,
   }) {
     final tg = TaskGroup(
-      parentSignal: parentSignal,
+      parentCancelToken: parentCancelToken,
       timeout: timeout,
       raiseOnTimeout: raiseOnTimeout,
     );
@@ -98,13 +98,13 @@ class TaskGroup {
   /// Runs [tasks] concurrently with shared cancellation, returning results in
   /// task order.
   static Future<List<T>> waitAll<T>(
-    Iterable<Future<T> Function(AbortSignal)> tasks, {
-    AbortSignal? parentSignal,
+    Iterable<Future<T> Function(CancelToken)> tasks, {
+    CancelToken? parentCancelToken,
     Duration? timeout,
     void Function(T)? cleanUp,
   }) async {
     final tg = TaskGroup(
-      parentSignal: parentSignal,
+      parentCancelToken: parentCancelToken,
       timeout: timeout,
     );
     final futures = [for (final task in tasks) tg.spawnWithFuture(task)];
@@ -131,7 +131,7 @@ class TaskGroup {
 
   /// Runs [tasks] concurrently with shared cancellation, returning the first
   /// successful result. When any task finishes successfully, the group is
-  /// aborted to cancel the others.
+  /// cancelled to cancel the others.
   ///
   /// Throws [ArgumentError] if [tasks] is empty.
   ///
@@ -140,20 +140,20 @@ class TaskGroup {
   /// [cleanUp] is applied to every result except the first (the returned one).
   /// If the group throws, [cleanUp] is applied to every recorded result.
   static Future<T> waitAny<T>(
-    Iterable<Future<T> Function(AbortSignal)> tasks, {
-    AbortSignal? parentSignal,
+    Iterable<Future<T> Function(CancelToken)> tasks, {
+    CancelToken? parentCancelToken,
     Duration? timeout,
     void Function(T)? cleanUp,
   }) async {
     final tg = TaskGroup(
-      parentSignal: parentSignal,
+      parentCancelToken: parentCancelToken,
       timeout: timeout,
     );
     final results = <T>[];
     for (final task in tasks) {
-      tg.spawn((signal) async {
-        results.add(await task(signal));
-        tg.abort();
+      tg.spawn((cancelToken) async {
+        results.add(await task(cancelToken));
+        tg.cancel();
       });
     }
 
@@ -179,8 +179,8 @@ class TaskGroup {
     return results.first;
   }
 
-  /// The shared cancellation signal for all tasks in this group.
-  AbortSignal get signal => _controller.signal;
+  /// The shared cancellation token for all tasks in this group.
+  CancelToken get cancelToken => _controller.cancelToken;
 
   /// Whether all tasks have completed and [waitComplete] has resolved.
   bool get completed => _completer?.isCompleted ?? false;
@@ -190,13 +190,14 @@ class TaskGroup {
 
   /// Whether this group absorbed its own cancellation, analogous to Trio's
   /// `CancelScope.cancelled_caught`. True if at least one task threw
-  /// [AbortException] due to this group's own signal being aborted (not a
-  /// parent signal), and no spurious aborts or other task failures occurred.
-  bool get abortCaught => _abortCaught;
+  /// [CancelException] due to this group's own token being cancelled (not a
+  /// parent token), and no spurious cancellations or other task failures
+  /// occurred.
+  bool get cancelCaught => _cancelCaught;
 
-  /// Aborts the group's own cancellation token, cancelling all running tasks.
-  void abort() {
-    _controller.abort();
+  /// Cancels the group's own cancellation token, cancelling all running tasks.
+  void cancel() {
+    _controller.cancel();
   }
 
   /// Replaces any existing timeout with a new one.
@@ -208,7 +209,7 @@ class TaskGroup {
     _timer?.cancel();
     _timer = Timer(timeout, () {
       _didTimeout = true;
-      _controller.abort();
+      _controller.cancel();
     });
   }
 
@@ -220,20 +221,20 @@ class TaskGroup {
     _timer = null;
     _parentRegistration?.unregister();
     _parentRegistration = null;
-    if (_spuriousAbort) {
+    if (_spuriousCancellation) {
       _completer!.completeError(StateError(
-        'A task in this TaskGroup threw AbortException without its '
-        'AbortSignal being aborted',
+        'A task in this TaskGroup threw CancelException without its '
+        'CancelToken being cancelled',
       ));
     } else if (_exceptions.isNotEmpty) {
       _completer!.completeError(
         AggregateException(_exceptions, _exceptionStackTraces),
       );
-    } else if (_sawLegitimateAbort) {
-      if (_parentSignal?.aborted ?? false) {
-        _completer!.completeError(const AbortException());
+    } else if (_sawLegitimateCancellation) {
+      if (_parentCancelToken?.cancelled ?? false) {
+        _completer!.completeError(const CancelException());
       } else {
-        _abortCaught = true;
+        _cancelCaught = true;
         if (didTimeout && _raiseOnTimeout) {
           _completer!.completeError(TimeoutException('TaskGroup timed out', _timeout));
         } else {
@@ -247,36 +248,36 @@ class TaskGroup {
 
   /// Spawns [task] as a concurrent member of this group.
   ///
-  /// If the group's signal is already aborted (due to a prior task failure or
-  /// cancellation), the task is spawned anyway with the same aborted signal —
-  /// it will see the abort at its first signal check.
+  /// If the group's token is already cancelled (due to a prior task failure or
+  /// cancellation), the task is spawned anyway with the same cancelled token —
+  /// it will see the cancellation at its first token check.
   ///
   /// Throws [StateError] if the group has already completed.
   ///
   /// Use [spawnWithFuture] if you need to await the individual task's result.
-  void spawn<T>(Future<T> Function(AbortSignal) task) {
+  void spawn<T>(Future<T> Function(CancelToken) task) {
     spawnWithFuture(task);
   }
 
   /// Like [spawn], but returns the task's [Outcome] so the caller can await
   /// the individual result. The returned future never throws; exceptions are
   /// wrapped in the [Outcome] and also reported through [waitComplete].
-  Future<Outcome<T>> spawnWithFuture<T>(Future<T> Function(AbortSignal) task) {
+  Future<Outcome<T>> spawnWithFuture<T>(Future<T> Function(CancelToken) task) {
     if (_completer?.isCompleted ?? false) {
       throw StateError('Cannot spawn a task on a completed TaskGroup');
     }
     _pendingCount++;
-    final future = task(signal);
+    final future = task(cancelToken);
 
     Future<Outcome<T>> wrap() async {
       try {
         return Outcome.succeeded(await future);
       } catch (error, stackTrace) {
-        if (error is AbortException) {
-          if (!signal.aborted) {
-            _spuriousAbort = true;
+        if (error is CancelException) {
+          if (!cancelToken.cancelled) {
+            _spuriousCancellation = true;
           } else {
-            _sawLegitimateAbort = true;
+            _sawLegitimateCancellation = true;
           }
         } else if (error is AggregateException) {
           // Flatten so that there are no nested AggregateException instances
@@ -286,7 +287,7 @@ class TaskGroup {
           _exceptions.add(error);
           _exceptionStackTraces.add(stackTrace);
         }
-        _controller.abort();
+        _controller.cancel();
         return Outcome.failed(error, stackTrace);
       } finally {
         _pendingCount--;
@@ -303,12 +304,12 @@ class TaskGroup {
   /// that allows an initially-empty group to settle. Repeated calls return the
   /// same future.
   ///
-  /// Throws [AggregateException] if any task threw a non-[AbortException],
-  /// [AbortException] if the parent signal was aborted, or [TimeoutException]
+  /// Throws [AggregateException] if any task threw a non-[CancelException],
+  /// [CancelException] if the parent token was cancelled, or [TimeoutException]
   /// if a timeout was set, it fired, and [raiseOnTimeout] is true. Task
-  /// exceptions take priority over [AbortException], which takes priority over
-  /// [TimeoutException]. If [abort] was called but the parent signal was not
-  /// aborted, the group completes normally (its own abort is consumed).
+  /// exceptions take priority over [CancelException], which takes priority over
+  /// [TimeoutException]. If [cancel] was called but the parent token was not
+  /// cancelled, the group completes normally (its own cancellation is consumed).
   Future<void> waitComplete() {
     if (_completer == null) {
       _finalizer.detach(this);

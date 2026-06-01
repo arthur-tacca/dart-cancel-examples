@@ -38,31 +38,31 @@ class Outcome<T> {
 
 /// Waits for [future], wrapping the outcome in a [Outcome].
 ///
-/// If [signal] is aborted before [future] completes, throws [AbortException].
-/// If [signal] is already aborted on entry, returns an immediately-failed
+/// If [cancelToken] is cancelled before [future] completes, throws [CancelException].
+/// If [cancelToken] is already cancelled on entry, returns an immediately-failed
 /// future.
 Future<Outcome<T>> waitCancellable<T>(
   Future<T> future, [
-  AbortSignal? signal,
+  CancelToken? cancelToken,
 ]) {
-  if (signal != null && signal.aborted) {
-    return Future.error(const AbortException());
+  if (cancelToken != null && cancelToken.cancelled) {
+    return Future.error(const CancelException());
   }
 
   final completer = Completer<Outcome<T>>();
-  AbortSignalRegistration? registration;
+  CancelTokenRegistration? registration;
 
-  if (signal != null) {
-    registration = signal.register(() {
+  if (cancelToken != null) {
+    registration = cancelToken.register(() {
       registration!.unregister();
       registration = null;
-      completer.completeError(const AbortException());
+      completer.completeError(const CancelException());
     });
   }
 
   future.then(
     (value) {
-      // Unregister before completing so that if abort was also scheduled in
+      // Unregister before completing so that if cancel was also scheduled in
       // the same turn, its entry.list check will suppress it.
       registration?.unregister();
       if (!completer.isCompleted) {
@@ -80,51 +80,51 @@ Future<Outcome<T>> waitCancellable<T>(
   return completer.future;
 }
 
-/// Waits for [duration], throwing [AbortException] if [signal] is aborted
-/// first. Also cancels the underlying timer when aborted.
-Future<void> sleep(Duration duration, [AbortSignal? signal]) {
-  if (signal != null && signal.aborted) {
-    return Future.error(const AbortException());
+/// Waits for [duration], throwing [CancelException] if [cancelToken] is cancelled
+/// first. Also cancels the underlying timer when cancelled.
+Future<void> sleep(Duration duration, [CancelToken? cancelToken]) {
+  if (cancelToken != null && cancelToken.cancelled) {
+    return Future.error(const CancelException());
   }
 
   final completer = Completer<void>();
-  AbortSignalRegistration? registration;
+  CancelTokenRegistration? registration;
 
   final timer = Timer(duration, () {
     registration?.unregister();
     completer.complete();
   });
 
-  registration = signal?.register(() {
+  registration = cancelToken?.register(() {
     timer.cancel();
     registration!.unregister();
-    completer.completeError(const AbortException());
+    completer.completeError(const CancelException());
   });
 
   return completer.future;
 }
 
-/// Wraps [stream] so that an [AbortException] error is injected and the source
-/// subscription cancelled when [signal] aborts.
+/// Wraps [stream] so that a [CancelException] error is injected and the source
+/// subscription cancelled when [cancelToken] cancels.
 ///
-/// If [signal] is already aborted on entry, returns an immediately-errored
+/// If [cancelToken] is already cancelled on entry, returns an immediately-errored
 /// stream.
 ///
 /// Note: if the source stream buffers multiple events in a single event loop
-/// turn, some may already be queued in the controller before abort fires,
-/// and would be yielded before the [AbortException]. For well-behaved streams
+/// turn, some may already be queued in the controller before cancel fires,
+/// and would be yielded before the [CancelException]. For well-behaved streams
 /// that deliver at most one event per turn this is not an issue.
-Stream<T> streamCancellable<T>(Stream<T> stream, [AbortSignal? signal]) {
-  if (signal == null) {
+Stream<T> streamCancellable<T>(Stream<T> stream, [CancelToken? cancelToken]) {
+  if (cancelToken == null) {
     return stream;
   }
-  if (signal.aborted) {
-    return Stream.error(const AbortException());
+  if (cancelToken.cancelled) {
+    return Stream.error(const CancelException());
   }
 
   final controller = StreamController<T>();
   StreamSubscription<T>? subscription;
-  AbortSignalRegistration? registration;
+  CancelTokenRegistration? registration;
 
   void cleanup() {
     registration?.unregister();
@@ -137,9 +137,9 @@ Stream<T> streamCancellable<T>(Stream<T> stream, [AbortSignal? signal]) {
   }
 
   controller.onListen = () {
-    registration = signal.register(() {
+    registration = cancelToken.register(() {
       if (!controller.isClosed) {
-        controller.addError(const AbortException());
+        controller.addError(const CancelException());
         cleanup();
       }
     });

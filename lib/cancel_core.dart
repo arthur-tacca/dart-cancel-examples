@@ -1,15 +1,15 @@
 import 'dart:async';
 import 'dart:collection';
 
-/// Thrown when an operation is aborted.
-class AbortException implements Exception {
-  const AbortException();
+/// Thrown when an operation is cancelled.
+class CancelException implements Exception {
+  const CancelException();
 
   @override
-  String toString() => 'AbortException';
+  String toString() => 'CancelException';
 }
 
-// Node in AbortSignal's linked list of callbacks.
+// Node in CancelToken's linked list of callbacks.
 base class _RegistrationEntry extends LinkedListEntry<_RegistrationEntry> {
   final void Function() callback;
   _RegistrationEntry(this.callback);
@@ -25,96 +25,96 @@ base class _RegistrationEntry extends LinkedListEntry<_RegistrationEntry> {
   }
 }
 
-/// Represents a callback registered with AbortSignal; allows unregistering.
-class AbortSignalRegistration {
+/// Represents a callback registered with CancelToken; allows unregistering.
+class CancelTokenRegistration {
   final _RegistrationEntry _entry;
 
-  AbortSignalRegistration._(_RegistrationEntry entry) : _entry = entry;
+  CancelTokenRegistration._(_RegistrationEntry entry) : _entry = entry;
 
   void unregister() {
     if (_entry.list == null) {
       throw StateError(
-        'unregister() called on an already-unregistered AbortSignalRegistration',
+        'unregister() called on an already-unregistered CancelTokenRegistration',
       );
     }
     _entry.unlink();
   }
 }
 
-/// An abort signal, also known as a cancel token.
+/// A cancellation token.
 ///
-/// Allows checking whether already aborted and registering to be notified
-/// when it is aborted. Obtained from an [AbortController].
-class AbortSignal {
-  bool _aborted = false;
+/// Allows checking whether already cancelled and registering to be notified
+/// when it is cancelled. Obtained from a [CancelController].
+class CancelToken {
+  bool _cancelled = false;
   final LinkedList<_RegistrationEntry> _registrations = LinkedList();
 
-  AbortSignal._();
+  CancelToken._();
 
-  void _abort() {
-    if (_aborted) {
+  void _cancel() {
+    if (_cancelled) {
       return;
     }
-    _aborted = true;
+    _cancelled = true;
     for (final entry in _registrations) {
       entry.schedule();
     }
   }
 
-  bool get aborted => _aborted;
+  bool get cancelled => _cancelled;
 
-  void throwIfAborted() {
-    if (_aborted) {
-      throw const AbortException();
+  void throwIfCancelled() {
+    if (_cancelled) {
+      throw const CancelException();
     }
   }
 
-  /// Registers [callback] to be called as a microtask when this signal is
-  /// aborted (or immediately scheduled, if already aborted).
-  AbortSignalRegistration register(void Function() callback) {
+  /// Registers [callback] to be called as a microtask when this token is
+  /// cancelled (or immediately scheduled, if already cancelled).
+  CancelTokenRegistration register(void Function() callback) {
     final entry = _RegistrationEntry(callback);
     _registrations.add(entry);
-    if (_aborted) {
+    if (_cancelled) {
       entry.schedule();
     }
-    return AbortSignalRegistration._(entry);
+    return CancelTokenRegistration._(entry);
   }
 }
 
-/// Controller that allows aborting requests through its [AbortSignal].
+/// Controller that allows cancelling requests through its [CancelToken].
 ///
-/// If [timeout] is supplied, [abort] is called automatically after that
-/// duration. If [linkedSignals] is supplied, [abort] is called when any of
-/// them aborts. In both cases, calling [abort] cancels the timer and removes
-/// registrations on linked signals, avoiding leaks.
-class AbortController {
-  final AbortSignal _signal = AbortSignal._();
+/// If [timeout] is supplied, [cancel] is called automatically after that
+/// duration. If [linkedCancelTokens] is supplied, [cancel] is called when any of
+/// them cancels. In both cases, calling [cancel] cancels the timer and removes
+/// registrations on linked tokens, avoiding leaks.
+class CancelController {
+  final CancelToken _cancelToken = CancelToken._();
   Timer? _timer;
-  List<AbortSignalRegistration>? _linkedRegistrations;
+  List<CancelTokenRegistration>? _linkedRegistrations;
 
-  AbortController({Duration? timeout, Iterable<AbortSignal>? linkedSignals}) {
+  CancelController({Duration? timeout, Iterable<CancelToken>? linkedCancelTokens}) {
     if (timeout != null) {
-      _timer = Timer(timeout, abort);
+      _timer = Timer(timeout, cancel);
     }
-    if (linkedSignals != null) {
+    if (linkedCancelTokens != null) {
       final regs = _linkedRegistrations = [];
-      for (final signal in linkedSignals) {
-        if (signal.aborted) {
-          abort();
+      for (final cancelToken in linkedCancelTokens) {
+        if (cancelToken.cancelled) {
+          cancel();
           return;
         }
-        regs.add(signal.register(abort));
+        regs.add(cancelToken.register(cancel));
       }
     }
   }
 
-  AbortSignal get signal => _signal;
+  CancelToken get cancelToken => _cancelToken;
 
-  void abort() {
+  void cancel() {
     _timer?.cancel();
     _timer = null;
     _linkedRegistrations?.forEach((reg) => reg.unregister());
     _linkedRegistrations = null;
-    _signal._abort();
+    _cancelToken._cancel();
   }
 }
