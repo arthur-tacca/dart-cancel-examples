@@ -36,15 +36,14 @@ class Outcome<T> {
       : Error.throwWithStackTrace(exception!, stackTrace!);
 }
 
-/// Waits for [future], wrapping the outcome in a [Outcome].
+/// Waits for [future], wrapping the outcome in an [Outcome].
 ///
-/// If [cancelToken] is cancelled before [future] completes, throws [CancelException].
-/// If [cancelToken] is already cancelled on entry, returns an immediately-failed
-/// future.
-Future<Outcome<T>> waitCancellable<T>(
-  Future<T> future, [
-  CancelToken? cancelToken,
-]) {
+/// Reads [currentCancelToken] at call time. If non-null, cancelling it before
+/// [future] completes throws [CancelException]; if it is already cancelled on
+/// entry, returns an immediately-failed future. If there is no ambient token
+/// the wait is uncancellable.
+Future<Outcome<T>> waitCancellable<T>(Future<T> future) {
+  final cancelToken = currentCancelToken;
   if (cancelToken != null && cancelToken.cancelled) {
     return Future.error(const CancelException());
   }
@@ -80,23 +79,43 @@ Future<Outcome<T>> waitCancellable<T>(
   return completer.future;
 }
 
-/// Waits for [duration], throwing [CancelException] if [cancelToken] is cancelled
-/// first. Also cancels the underlying timer when cancelled.
-Future<void> sleep(Duration duration, [CancelToken? cancelToken]) {
+/// Waits for [duration] (or forever, if [duration] is null), throwing
+/// [CancelException] if [currentCancelToken] (read at call time) is cancelled
+/// first.
+///
+/// `await sleep(Duration.zero)` (or any non-positive duration) is the
+/// recommended application-code syntax for a cancellation point: it throws if
+/// the ambient token is already cancelled, otherwise resolves without
+/// scheduling a timer. Code that already interacts with cancel tokens directly
+/// should use `currentCancelToken?.throwIfCancelled()` instead.
+///
+/// Calling `sleep()` (or `sleep(null)`) outside an ambient cancel scope throws
+/// [StateError]: with no duration *and* no token, the wait can never unblock.
+Future<void> sleep([Duration? duration]) {
+  final cancelToken = currentCancelToken;
   if (cancelToken != null && cancelToken.cancelled) {
     return Future.error(const CancelException());
+  }
+  if (duration != null && duration <= Duration.zero) {
+    return Future.value();
+  }
+  if (duration == null && cancelToken == null) {
+    throw StateError('sleep() with no duration requires an ambient cancel token');
   }
 
   final completer = Completer<void>();
   CancelTokenRegistration? registration;
 
-  final timer = Timer(duration, () {
-    registration?.unregister();
-    completer.complete();
-  });
+  // No timer when duration is null — only cancellation will unblock.
+  final timer = duration == null
+      ? null
+      : Timer(duration, () {
+          registration?.unregister();
+          completer.complete();
+        });
 
   registration = cancelToken?.register(() {
-    timer.cancel();
+    timer?.cancel();
     registration!.unregister();
     completer.completeError(const CancelException());
   });
@@ -105,8 +124,8 @@ Future<void> sleep(Duration duration, [CancelToken? cancelToken]) {
 }
 
 /// Wraps [stream] so that the source subscription is cancelled when
-/// [cancelToken] cancels, and a terminal error is then injected for the
-/// consumer.
+/// [currentCancelToken] (read at call time) cancels, and a terminal error is
+/// then injected for the consumer.
 ///
 /// Cancellation is deferred so that the source is never cancelled while a loop
 /// body is running. If the token cancels while the consumer is mid-iteration
@@ -130,14 +149,12 @@ Future<void> sleep(Duration duration, [CancelToken? cancelToken]) {
 /// When the source completes on its own, its subscription is already finished and
 /// is not cancelled again.
 ///
+/// If there is no ambient token the source stream is returned unwrapped.
+///
 /// A value whose delivery was already queued when the token cancelled is dropped
 /// rather than handed to the consumer, so the loop body never sees a post-cancel
 /// item (and, for an `async*` source, the value it had run one step ahead to
 /// produce is suppressed).
-///
-/// If [cancelToken] is already cancelled on entry, the source is still briefly
-/// subscribed and then cancelled so its cleanup runs, and the consumer receives
-/// the [CancelException] without any buffered source events.
 ///
 /// Because cancellation is deferred until the consumer next reads, a long-running
 /// or infinite loop body keeps the source subscription (and any sockets or timers
@@ -145,10 +162,11 @@ Future<void> sleep(Duration duration, [CancelToken? cancelToken]) {
 /// does NOT work well with `async*` generators: cancelling a subscription to a
 /// generator only takes effect when it next reaches a `yield`, so a generator
 /// parked on an `await` that does not itself observe the token is never cancelled
-/// and the [CancelException] is never delivered. For generators, plumb the token
-/// into the generator body itself (e.g. wrap its awaits with [waitCancellable] or
-/// [sleep]) instead.
-Stream<T> streamCancellable<T>(Stream<T> stream, [CancelToken? cancelToken]) {
+/// and the [CancelException] is never delivered. For generators, make the awaits
+/// inside the generator cancellable (e.g. via [waitCancellable] or [sleep])
+/// instead.
+Stream<T> streamCancellable<T>(Stream<T> stream) {
+  final cancelToken = currentCancelToken;
   if (cancelToken == null) {
     return stream;
   }
@@ -278,13 +296,14 @@ Stream<T> streamCancellable<T>(Stream<T> stream, [CancelToken? cancelToken]) {
 /// [StateError]. The notification is asynchronous, so a producer racing the
 /// shutdown must still guard `add`.
 ///
-/// If [cancelToken] is supplied, cancelling it interrupts the consumer and
-/// closes the controller. [drainOnCancel] selects what the consumer sees: when
-/// true (the default) the queued items are delivered first and the
-/// [CancelException] follows; when false the [CancelException] is raised ahead of
-/// any items still queued, dropping them. If [cancelToken] is already cancelled
-/// when [oneWayChannel] is called, [stream] errors on first listen and the
-/// controller is closed immediately.
+/// The channel binds to [currentCancelToken] (read at call time). If there is
+/// an ambient token, cancelling it interrupts the consumer and closes the
+/// controller. [drainOnCancel] selects what the consumer sees: when true (the
+/// default) the queued items are delivered first and the [CancelException]
+/// follows; when false the [CancelException] is raised ahead of any items still
+/// queued, dropping them. If the ambient token is already cancelled when
+/// [oneWayChannel] is called, [stream] errors on first listen and the controller
+/// is closed immediately.
 ///
 /// When [drainOnCancel] is true the controller is closed as soon as the token
 /// cancels, so producers are barred immediately (as above). When it is false the
@@ -294,9 +313,9 @@ Stream<T> streamCancellable<T>(Stream<T> stream, [CancelToken? cancelToken]) {
 /// (silently dropped) in the window between the token cancelling and the consumer
 /// next being read.
 ({Stream<T> stream, StreamSink<T> sink}) oneWayChannel<T>([
-  CancelToken? cancelToken,
   bool drainOnCancel = true,
 ]) {
+  final cancelToken = currentCancelToken;
   final controller = StreamController<T>();
   CancelTokenRegistration? registration;
 
@@ -348,9 +367,10 @@ Stream<T> streamCancellable<T>(Stream<T> stream, [CancelToken? cancelToken]) {
     // streamCancellable defers cancellation while the consumer is mid-iteration,
     // so the close (and thus the barring of producers) does not happen until the
     // consumer next reads or stops listening; a producer racing that window may
-    // still add an item, which is then silently dropped.
+    // still add an item, which is then silently dropped. streamCancellable reads
+    // the same ambient token captured above.
     return (
-      stream: streamCancellable(controller.stream, cancelToken),
+      stream: streamCancellable(controller.stream),
       sink: controller.sink,
     );
   }

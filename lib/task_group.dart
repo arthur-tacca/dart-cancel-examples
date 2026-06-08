@@ -22,11 +22,14 @@ class AggregateException implements Exception {
       '${exceptions.map((e) => '  $e').join('\n')}';
 }
 
-/// A dynamically-growable group of concurrent tasks sharing a cancel token.
-/// Tasks can be added at any point before [waitComplete] resolves.
+/// A dynamically-growable group of concurrent tasks sharing a cancellation
+/// token. Tasks can be added at any point before [waitComplete] resolves.
 ///
 /// Owns a [CancelScope] (exposed via [scope]) that handles parent-token
-/// propagation and absorption of the group's own cancellation. Use the scope
+/// propagation, timeouts, and absorption of the group's own cancellation. The
+/// scope forks a zone in which the group's token is the ambient
+/// [currentCancelToken], so spawned tasks (and any code they call) pick it up
+/// without needing the token threaded through as a parameter. Use the scope
 /// for cancellation operations: `tg.scope.cancel()`, `tg.scope.setTimeout(...)`,
 /// `tg.scope.cancelCaught`.
 class TaskGroup {
@@ -38,7 +41,7 @@ class TaskGroup {
   });
 
   final CancelScope _scope;
-  late final CancelToken _cancelToken;
+  late final Zone _zone;
   int _pendingCount = 0;
   bool _sawCancel = false;
   bool _waitCompleteCalled = false;
@@ -47,17 +50,23 @@ class TaskGroup {
   final _exceptions = <Object>[];
   final _exceptionStackTraces = <StackTrace>[];
 
-  /// Creates a task group. If [parentCancelToken] is supplied, cancelling it also
-  /// cancels this group. For deadline-based cancel, call
-  /// `tg.scope.setTimeout(...)` after construction.
-  TaskGroup({
-    CancelToken? parentCancelToken,
-  }) : _scope = CancelScope(parentCancelToken: parentCancelToken) {
-    // Enter the scope eagerly so the body callback can capture its token for
-    // synchronous use by spawn(). The body parks on _tasksDone until the user
-    // signals "done spawning" by calling waitComplete().
-    _waitFuture = _scope.using((cancelToken) async {
-      _cancelToken = cancelToken;
+  /// Creates a task group. The parent token is the ambient [currentCancelToken]
+  /// at construction time — so a [TaskGroup] created inside another group's
+  /// body inherits cancellation from the enclosing group automatically. If
+  /// [shield] is true, the group does **not** link to the ambient token —
+  /// its tasks run uncancelled by the parent.
+  ///
+  /// To attach a timeout, call `tg.scope.setTimeout(...)` after
+  /// construction. The group absorbs its own timeout — [waitComplete]
+  /// returns normally with `scope.cancelCaught` set to true. Callers that
+  /// want a thrown [TimeoutException] should use [waitAll] or [waitAny].
+  TaskGroup({bool shield = false}) : _scope = CancelScope(shield: shield) {
+    // Enter the scope eagerly so the body callback can capture the scope's
+    // forked zone for synchronous use by spawn(). The body parks on
+    // _tasksDone until the user signals "done spawning" by calling
+    // waitComplete().
+    _waitFuture = _scope.using(() async {
+      _zone = Zone.current;
       await _tasksDone.future;
     });
     _finalizer.attach(this, StackTrace.current, detach: this);
@@ -68,31 +77,27 @@ class TaskGroup {
   ///
   /// Exceptions thrown by [body] are collected alongside those of any other
   /// spawned tasks and reported as a single [AggregateException]. The body
-  /// receives this group's [CancelToken] as a parameter, matching the spawn
-  /// callback signature.
+  /// runs in the group's forked zone, so cancellable helpers inside it pick
+  /// up the group's token as [currentCancelToken] without explicit threading.
   ///
-  /// May be called only once per task group; subsequent calls (or calls
-  /// after [waitComplete]) throw [StateError].
-  Future<void> using(Future<void> Function(CancelToken) body) {
-    if (_waitCompleteCalled) {
-      throw StateError(
-        'TaskGroup.using() called after waitComplete() (or a previous using())',
-      );
-    }
+  /// Calling `using` on a group that has already completed throws
+  /// [StateError] — `spawn()` rejects tasks on a completed group.
+  Future<void> using(Future<void> Function() body) {
     spawn(body);
     return waitComplete();
   }
 
   /// Runs [tasks] concurrently with shared cancellation, returning results in
-  /// task order. If [timeout] is supplied and expires (and at least one task
-  /// observes the cancel), [TimeoutException] is thrown.
+  /// task order. If [timeout] is supplied and expires before all tasks
+  /// complete, throws [TimeoutException] (with [cleanUp] applied to any
+  /// partial results).
   static Future<List<T>> waitAll<T>(
-    Iterable<Future<T> Function(CancelToken)> tasks, {
-    CancelToken? parentCancelToken,
+    Iterable<Future<T> Function()> tasks, {
+    bool shield = false,
     Duration? timeout,
     void Function(T)? cleanUp,
   }) async {
-    final tg = TaskGroup(parentCancelToken: parentCancelToken);
+    final tg = TaskGroup(shield: shield);
     if (timeout != null) tg.scope.setTimeout(timeout);
     final futures = [for (final task in tasks) tg.spawnWithFuture(task)];
 
@@ -114,8 +119,8 @@ class TaskGroup {
     }
 
     if (tg.scope.cancelCaught) {
-      // The only cancel source here is the timeout — waitAll doesn't expose
-      // the scope and parent cancel would have thrown out of waitComplete.
+      // No external canceller can reach this group, so the only thing that
+      // could have absorbed a cancellation is the timeout firing.
       if (cleanUp != null) {
         for (final v in results) {
           cleanUp(v);
@@ -129,18 +134,18 @@ class TaskGroup {
 
   /// Runs [tasks] concurrently with shared cancellation, returning the first
   /// successful result. When any task finishes successfully, the group is
-  /// cancelled, cancelling the others.
+  /// cancelled to cancel the others. If [timeout] is supplied and expires
+  /// before any task succeeds, throws [TimeoutException].
   ///
-  /// Throws [ArgumentError] if [tasks] is empty, or [TimeoutException] if
-  /// [timeout] is supplied and expires before any task succeeds.
+  /// Throws [ArgumentError] if [tasks] is empty.
   ///
   /// Successful results are recorded in completion order. If more than one
   /// task produces a result and the group completes without exception,
   /// [cleanUp] is applied to every result except the first (the returned one).
   /// If the group throws, [cleanUp] is applied to every recorded result.
   static Future<T> waitAny<T>(
-    Iterable<Future<T> Function(CancelToken)> tasks, {
-    CancelToken? parentCancelToken,
+    Iterable<Future<T> Function()> tasks, {
+    bool shield = false,
     Duration? timeout,
     void Function(T)? cleanUp,
   }) async {
@@ -148,12 +153,12 @@ class TaskGroup {
     if (taskList.isEmpty) {
       throw ArgumentError.value(tasks, 'tasks', 'must not be empty');
     }
-    final tg = TaskGroup(parentCancelToken: parentCancelToken);
+    final tg = TaskGroup(shield: shield);
     if (timeout != null) tg.scope.setTimeout(timeout);
     final results = <T>[];
     for (final task in taskList) {
-      tg.spawn((cancelToken) async {
-        results.add(await task(cancelToken));
+      tg.spawn(() async {
+        results.add(await task());
         tg.scope.cancel();
       });
     }
@@ -170,8 +175,9 @@ class TaskGroup {
     }
 
     if (results.isEmpty) {
-      // The empty-input case threw above, so an empty results list here means
-      // the timeout fired before any task could record a result.
+      // No task succeeded before the group's token was cancelled. The only
+      // thing that can cancel it (with tasks present and no thrown
+      // exception) is the timeout.
       throw TimeoutException('TaskGroup.waitAny timed out', timeout);
     }
     if (cleanUp != null) {
@@ -191,6 +197,10 @@ class TaskGroup {
 
   /// Spawns [task] as a concurrent member of this group.
   ///
+  /// The task runs in this group's forked zone, so [currentCancelToken] inside the
+  /// task body resolves to the group's token. Cancellable helpers can be
+  /// called without passing a token explicitly.
+  ///
   /// If the group's token is already cancelled (due to a prior task failure or
   /// cancellation), the task is spawned anyway with the same cancelled token —
   /// it will see the cancel at its first token check.
@@ -198,23 +208,22 @@ class TaskGroup {
   /// Throws [StateError] if the group has already completed.
   ///
   /// Use [spawnWithFuture] if you need to await the individual task's result.
-  void spawn<T>(Future<T> Function(CancelToken) task) {
+  void spawn<T>(Future<T> Function() task) {
     spawnWithFuture(task);
   }
 
   /// Like [spawn], but returns the task's [Outcome] so the caller can await
   /// the individual result. The returned future never throws; exceptions are
   /// wrapped in the [Outcome] and also reported through [waitComplete].
-  Future<Outcome<T>> spawnWithFuture<T>(Future<T> Function(CancelToken) task) {
+  Future<Outcome<T>> spawnWithFuture<T>(Future<T> Function() task) {
     if (_tasksDone.isCompleted) {
       throw StateError('Cannot spawn a task on a completed TaskGroup');
     }
     _pendingCount++;
-    final future = task(_cancelToken);
 
     Future<Outcome<T>> wrap() async {
       try {
-        return Outcome.succeeded(await future);
+        return Outcome.succeeded(await task());
       } catch (error, stackTrace) {
         if (error is CancelException) {
           _sawCancel = true;
@@ -234,7 +243,7 @@ class TaskGroup {
       }
     }
 
-    return wrap();
+    return _zone.run(wrap);
   }
 
   void _checkTasksDone() {
@@ -258,14 +267,14 @@ class TaskGroup {
   /// that allows an initially-empty group to settle. Repeated calls return the
   /// same future.
   ///
-  /// Throws [AggregateException] if any task threw a non-[CancelException], or
-  /// [CancelException] if at least one task observed the cancel and the parent
-  /// token was cancelled. Task exceptions take priority over [CancelException].
-  /// If `scope.cancel()` was called (e.g. via `scope.setTimeout(...)` expiring)
-  /// but the parent token was not cancelled, the group completes normally (its
-  /// own cancel is consumed) and [scope].`cancelCaught` is true. If a parent
-  /// cancel fired but every task finished before noticing, the group also
-  /// completes normally.
+  /// Throws [AggregateException] if any task threw a non-[CancelException],
+  /// or [CancelException] if at least one task observed the cancel and the
+  /// parent token was cancelled. Task exceptions take priority over
+  /// [CancelException]. If `scope.cancel()` was called or the timeout fired
+  /// but the parent token was not cancelled, the group completes normally
+  /// (its own cancel is consumed; `scope.cancelCaught` records that this
+  /// happened). If a parent cancel or timeout fired but every task finished
+  /// before noticing, the group also completes normally.
   Future<void> waitComplete() {
     if (!_waitCompleteCalled) {
       _waitCompleteCalled = true;

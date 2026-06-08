@@ -2,24 +2,22 @@ import 'dart:io';
 
 import 'package:dart_cancel_examples/cancel_core.dart';
 
-/// Connects a [Socket] to [host]:[port], with optional cancellation.
+/// Connects a [Socket] to [host]:[port].
 ///
-/// If [cancelToken] is already cancelled when called, throws [CancelException]
-/// immediately. If it is cancelled while the connection is in progress, the
-/// attempt is cancelled and [CancelException] is thrown. A genuine connection
-/// error (e.g. refused or unreachable) throws [SocketException] as normal.
-Future<Socket> connectSocket(
-  String host,
-  int port, {
-  CancelToken? cancelToken,
-}) async {
-  cancelToken?.throwIfCancelled();
+/// Reads [currentCancelToken] at call time. If it's already cancelled, throws
+/// [CancelException] immediately. If it cancels while the connection is in
+/// progress, the attempt is cancelled and [CancelException] is thrown. A
+/// genuine connection error (e.g. refused or unreachable) throws
+/// [SocketException] as normal.
+Future<Socket> connectSocket(String host, int port) async {
+  final token = currentCancelToken;
+  token?.throwIfCancelled();
   final task = await Socket.startConnect(host, port);
-  final registration = cancelToken?.register(task.cancel);
+  final registration = token?.register(task.cancel);
   try {
     return await task.socket;
   } on SocketException {
-    if (cancelToken?.cancelled ?? false) {
+    if (token?.cancelled ?? false) {
       throw const CancelException();
     }
     rethrow;
@@ -28,31 +26,32 @@ Future<Socket> connectSocket(
   }
 }
 
-/// Connects a [SecureSocket] to [host]:[port], with optional cancellation.
+/// Connects a [SecureSocket] to [host]:[port].
 ///
-/// If [cancelToken] is already cancelled when called, throws [CancelException]
-/// immediately. If it is cancelled while the connection is in progress, the
-/// attempt is cancelled and [CancelException] is thrown. A genuine connection
-/// error (e.g. refused or unreachable) throws [SocketException] as normal.
+/// Reads [currentCancelToken] at call time. If it's already cancelled, throws
+/// [CancelException] immediately. If it cancels while the connection is in
+/// progress, the attempt is cancelled and [CancelException] is thrown. A
+/// genuine connection error (e.g. refused or unreachable) throws
+/// [SocketException] as normal.
 Future<SecureSocket> connectSecureSocket(
   String host,
   int port, {
   SecurityContext? context,
   bool Function(X509Certificate)? onBadCertificate,
-  CancelToken? cancelToken,
 }) async {
-  cancelToken?.throwIfCancelled();
+  final token = currentCancelToken;
+  token?.throwIfCancelled();
   final task = await SecureSocket.startConnect(
     host,
     port,
     context: context,
     onBadCertificate: onBadCertificate,
   );
-  final registration = cancelToken?.register(task.cancel);
+  final registration = token?.register(task.cancel);
   try {
     return await task.socket;
   } on SocketException {
-    if (cancelToken?.cancelled ?? false) {
+    if (token?.cancelled ?? false) {
       throw const CancelException();
     }
     rethrow;
